@@ -1,0 +1,34 @@
+---
+# ============================================================
+# prescan.yml — Pre-remediation OpenSCAP scan (read-only)
+# Captures baseline compliance state before remediation runs.
+# Reports saved to os_stig_results_dir for recordkeeping.
+# ============================================================
+
+- name: Run pre-remediation STIG scan
+  ansible.builtin.command:
+    argv:
+      - oscap
+      - xccdf
+      - eval
+      - "--profile"
+      - "{{ os_stig_profile }}"
+      - "--results"
+      - "{{ os_stig_results_dir }}/prescan_results.xml"
+      - "--report"
+      - "{{ os_stig_results_dir }}/prescan_report.html"
+      - "{{ os_stig_ds_file }}"
+  register: _prescan
+  # oscap exits 2 when findings exist (expected on a fresh system); 0 = fully compliant
+  failed_when: _prescan.rc not in [0, 2]
+  changed_when: false
+  tags: [os_hardening, scan]
+
+- name: Display pre-scan summary
+  ansible.builtin.debug:
+    msg:
+      - "Pre-remediation scan complete."
+      - "Results: {{ os_stig_results_dir }}/prescan_results.xml"
+      - "Report:  {{ os_stig_results_dir }}/prescan_report.html"
+      - "oscap exit code {{ _prescan.rc }} (0=pass, 2=findings present)"
+  tags: [os_hardening, scan]

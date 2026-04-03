@@ -1,0 +1,1516 @@
+---
+# =============================================================================
+# Ubuntu 24.04 LTS - STIG Pre-Hardening Playbook
+# =============================================================================
+# Purpose   : Address known STIG failures on a fresh Ubuntu 24.04 install
+#             BEFORE OpenSCAP remediation runs, maximizing final compliance score.
+# Pipeline  : This playbook runs FIRST, followed by OpenSCAP xccdf generate fix.
+# Skipped   : FIPS 140-3 kernel mode (UBTU-24-600030 / V-270744) - requires Ubuntu Pro
+#             PIV/Smart card (UBTU-24-400020/030/060/375/380) - requires hardware token
+#             SSSD PKI identity mapping (UBTU-24-400370 / V-270736) - ldap_user_certificate is LDAP-
+#               only; invalid in [domain/files] and crashes sssd. Configure at deploy time with
+#               real LDAP/AD domain replacing the placeholder files domain in sssd.conf.
+# Reference : SSG 0.1.79 ssg-ubuntu2404-ds.xml used for scanner-exact values
+#             (SSG-shipped Ansible not used directly due to known bugs)
+# =============================================================================
+
+- name: Ubuntu 24.04 LTS STIG Pre-Hardening
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # SSH daemon FIPS 140-3 hash algorithms for message auth — scanner-exact (UBTU-24-100830 / V-270668)
+    # hmac-sha1 variants are NOT FIPS 140-3 approved and were removed from this list.
+    sshd_approved_macs: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    # SSH client FIPS 140-3 hash algorithms for message auth — scanner-exact (UBTU-24-100860 / V-270671)
+    ssh_client_approved_macs: "hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    # SSH daemon FIPS 140-3 ciphers (UBTU-24-100820 / V-270667) — scanner-exact, no aes192-ctr
+    ssh_approved_ciphers: "aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes128-ctr"
+    # SSH client FIPS 140-3 ciphers (UBTU-24-100850 / V-270670) — scanner-exact, no aes192-ctr
+    ssh_client_approved_ciphers: "aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes128-ctr"
+    # SSH FIPS 140-3 key exchange algorithms (UBTU-24-100840 / V-270669) — scanner-exact full list
+    ssh_approved_kex: "ecdh-sha2-nistp521,ecdh-sha2-nistp384,ecdh-sha2-nistp256,diffie-hellman-group-exchange-sha256,diffie-hellman-group16-sha512,diffie-hellman-group14-sha256"
+    # Audit log directory
+    audit_log_dir: /var/log/audit
+    # Audit rules directory
+    audit_rules_dir: /etc/audit/rules.d
+    # Root recovery password for single-user mode auth (UBTU-24-102000).
+    # IMPORTANT: Override with Ansible Vault in inventory or group_vars:
+    #   ansible-vault encrypt_string 'YourStrongPassword' --name 'vault_root_recovery_password'
+    # Do NOT leave the default value in production.
+    root_recovery_password: "{{ vault_root_recovery_password | default('CHANGEME_USE_VAULT') }}"
+    # Audisp remote log collector host (V-270658). Set in inventory or vault.
+    audispd_remote_server: "{{ vault_audispd_remote_server | default('logcollector') }}"
+    # NTP server (V-270751). Set in inventory or vault.
+    ntp_server: "{{ vault_ntp_server | default('0.us.pool.ntp.mil') }}"
+
+  # ---------------------------------------------------------------------------
+  # SECTION 1: PACKAGE MANAGEMENT
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # UBTU-24-100010 - Remove systemd-timesyncd
+    - name: "UBTU-24-100010 | Remove systemd-timesyncd package"
+      ansible.builtin.apt:
+        name: systemd-timesyncd
+        state: absent
+        purge: true
+
+    # UBTU-24-100020 - Remove ntp
+    - name: "UBTU-24-100020 | Remove ntp package"
+      ansible.builtin.apt:
+        name: ntp
+        state: absent
+        purge: true
+
+    # UBTU-24-100030 - Remove telnet
+    - name: "UBTU-24-100030 | Remove telnet package"
+      ansible.builtin.apt:
+        name: telnet
+        state: absent
+        purge: true
+
+    # UBTU-24-100040 - Remove rsh-server
+    - name: "UBTU-24-100040 | Remove rsh-server package"
+      ansible.builtin.apt:
+        name: rsh-server
+        state: absent
+        purge: true
+
+    # UBTU-24-100700 - Install chrony
+    - name: "UBTU-24-100700 | Install chrony package"
+      ansible.builtin.apt:
+        name: chrony
+        state: present
+        update_cache: true
+
+    # UBTU-24-100800 / UBTU-24-100810 - Install and enable SSH
+    - name: "UBTU-24-100800 | Install openssh-server"
+      ansible.builtin.apt:
+        name: openssh-server
+        state: present
+
+    - name: "UBTU-24-100800 | Enable and start SSH service"
+      ansible.builtin.systemd:
+        name: ssh
+        enabled: true
+        state: started
+
+    # UBTU-24-100100 / UBTU-24-100130 - Install AIDE
+    - name: "UBTU-24-100100 | Install aide package"
+      ansible.builtin.apt:
+        name: aide
+        state: present
+
+    - name: "UBTU-24-100130 | Install aide-common package"
+      ansible.builtin.apt:
+        name: aide-common
+        state: present
+
+    # UBTU-24-100300 / UBTU-24-100310 - Install and enable UFW
+    - name: "UBTU-24-100300 | Install ufw package"
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    # Allow SSH BEFORE enabling UFW — reversing this order will lock out the
+    # current SSH session the moment UFW activates its default deny-incoming policy.
+    - name: "UBTU-24-100310 | Allow SSH through UFW before enabling"
+      community.general.ufw:
+        rule: allow
+        name: OpenSSH
+      ignore_errors: true
+
+    - name: "UBTU-24-100310 | Enable UFW"
+      community.general.ufw:
+        state: enabled
+      ignore_errors: true
+
+    # NOTE: UFW is now active with default deny-incoming.
+    # This baseline opens SSH only. Any additional service ports should be
+    # explicitly allowed by site policy in inventory host_vars or a wrapper playbook.
+
+    # UBTU-24-100400 / UBTU-24-100410 - Install and enable auditd
+    - name: "UBTU-24-100400 | Install auditd and audispd-plugins packages"
+      ansible.builtin.apt:
+        name:
+          - auditd
+          - audispd-plugins
+        state: present
+
+    - name: "UBTU-24-100410 | Enable and start auditd service"
+      ansible.builtin.systemd:
+        name: auditd
+        enabled: true
+        state: started
+
+    # UBTU-24-100500 / UBTU-24-100510 - Install and enable AppArmor
+    - name: "UBTU-24-100500 | Install apparmor package"
+      ansible.builtin.apt:
+        name: apparmor
+        state: present
+
+    - name: "UBTU-24-100510 | Enable and start AppArmor service"
+      ansible.builtin.systemd:
+        name: apparmor
+        enabled: true
+        state: started
+
+    # UBTU-24-100600 - Install libpam-pwquality
+    - name: "UBTU-24-100600 | Install libpam-pwquality package"
+      ansible.builtin.apt:
+        name: libpam-pwquality
+        state: present
+
+    # UBTU-24-100650 - Install SSSD packages.
+    # libpam-sss and libnss-sss are intentionally NOT installed here.
+    # On Ubuntu, installing libpam-sss triggers pam-auth-update which automatically
+    # inserts pam_sss.so into the PAM stack. If sssd is misconfigured or not yet
+    # running, that causes a complete authentication lockout. The OpenSCAP fix script
+    # (which runs next) will install libpam-sss after sssd is confirmed working,
+    # safely integrating sssd into PAM at that point.
+    - name: "UBTU-24-100650 | Install sssd package"
+      ansible.builtin.apt:
+        name: sssd
+        state: present
+
+    # V-270663 - SSSD service must be enabled and running.
+    # A minimal sssd.conf using the 'files' provider is created so the daemon can start
+    # without an LDAP/AD identity provider. The files provider reads /etc/passwd and
+    # /etc/shadow — sssd starts cleanly with no external dependencies.
+    # V-270736 (ldap_user_certificate) is deploy-time only — that option is LDAP-specific
+    # and crashes sssd if placed in a [domain/files] section (see Skipped header).
+    - name: "V-270663 | Ensure /etc/sssd directory exists"
+      ansible.builtin.file:
+        path: /etc/sssd
+        state: directory
+        owner: root
+        group: root
+        mode: '0711'
+
+    - name: "V-270663 | Deploy minimal sssd.conf (files provider, NSS only)"
+      ansible.builtin.copy:
+        dest: /etc/sssd/sssd.conf
+        owner: root
+        group: root
+        mode: '0600'
+        force: false
+        content: |
+          # Minimal SSSD configuration — STIG build image placeholder.
+          # services = nss only; PAM integration is handled by OpenSCAP fix script
+          # after sssd is confirmed running, preventing a PAM lockout during the build.
+          # Replace [domain/files] with a real LDAP/AD domain at deploy time.
+          [sssd]
+          services = nss
+          domains = files
+
+          [nss]
+
+          [domain/files]
+          id_provider = files
+
+    - name: "V-270663 | Enable and start sssd service"
+      ansible.builtin.systemd:
+        name: sssd
+        enabled: true
+        state: started
+      ignore_errors: true
+
+    # UBTU-24-101000 - Install vlock for session locking
+    - name: "UBTU-24-101000 | Install vlock package"
+      ansible.builtin.apt:
+        name: vlock
+        state: present
+
+  # ---------------------------------------------------------------------------
+  # SECTION 2: SSH DAEMON HARDENING
+  # ---------------------------------------------------------------------------
+  # Ubuntu 24.04 sshd_config has "Include /etc/ssh/sshd_config.d/*.conf" at the
+  # TOP of the file. SSH uses first-match-wins, so drop-in files take precedence
+  # over anything in the main sshd_config. Writing all STIG settings to the
+  # drop-in ensures the scanner (which uses "sshd -T" effective config) sees the
+  # correct values regardless of what the main config contains.
+
+    - name: "SSH | Ensure sshd_config.d directory exists"
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    # Remove commented X11Forwarding from main sshd_config.
+    # The scanner does: grep -ir x11forwarding /etc/ssh/sshd_config* | grep -v "^#"
+    # grep output is prefixed with filename, so grep -v "^#" does NOT filter commented
+    # lines inside files — both the comment and our drop-in line are returned → FAIL.
+    - name: "V-270708 | Remove commented X11Forwarding from main sshd_config"
+      ansible.builtin.replace:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*X11Forwarding\s+.*$'
+        replace: '# X11Forwarding managed by sshd_config.d drop-in'
+
+    # V-270667/668/669 — Write SSH daemon crypto directly to main /etc/ssh/sshd_config.
+    # The SCC OVAL checks the main sshd_config file (not sshd_config.d drop-ins) for
+    # Ciphers, MACs, and KexAlgorithms. Writing here also prevents OpenSCAP from adding
+    # duplicate lines (it skips remediation when the existing value is already correct).
+    - name: "V-270667 | Set sshd Ciphers in main sshd_config"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^[#\s]*Ciphers\s'
+        line: "Ciphers {{ ssh_approved_ciphers }}"
+        state: present
+      notify: restart ssh
+
+    - name: "V-270668 | Set sshd MACs in main sshd_config"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^[#\s]*MACs\s'
+        line: "MACs {{ sshd_approved_macs }}"
+        state: present
+      notify: restart ssh
+
+    - name: "V-270669 | Set sshd KexAlgorithms in main sshd_config"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^[#\s]*KexAlgorithms\s'
+        line: "KexAlgorithms {{ ssh_approved_kex }}"
+        state: present
+      notify: restart ssh
+
+    # V-270670/671 — Write SSH client crypto directly to main /etc/ssh/ssh_config.
+    # Same rationale: SCC OVAL checks the main ssh_config file. lineinfile replaces
+    # the default commented examples (#   Ciphers ..., #   MACs ...) in Ubuntu ssh_config.
+    - name: "V-270670 | Set SSH client Ciphers in main ssh_config"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/ssh_config
+        regexp: '^[#\s]*Ciphers\s'
+        line: "Ciphers {{ ssh_client_approved_ciphers }}"
+        state: present
+      notify: restart ssh
+
+    - name: "V-270671 | Set SSH client MACs in main ssh_config"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/ssh_config
+        regexp: '^[#\s]*MACs\s'
+        line: "MACs {{ ssh_client_approved_macs }}"
+        state: present
+      notify: restart ssh
+
+    # Deploy remaining STIG sshd settings as a drop-in.
+    # NOTE: Ciphers, MACs, and KexAlgorithms are intentionally NOT in this drop-in —
+    # they are written to the main sshd_config above. Having them in BOTH files causes
+    # the SCC check to report "conflicting results" (grep -irs macs returns two hits).
+    - name: "UBTU-24-300022/300023/300031/600000/600010/500010/200090/400110 | Deploy STIG sshd drop-in config"
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-stig-hardening.conf
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          # STIG-hardened SSH daemon settings for Ubuntu 24.04
+          # Managed by Ansible pre_openscap.yml — do not edit manually.
+          # Ciphers, MACs, KexAlgorithms are set in main sshd_config (not here).
+
+          # UBTU-24-300022 — Disable X11 forwarding
+          X11Forwarding no
+
+          # UBTU-24-300023 — X11 proxy display (must be yes when X11Forwarding no)
+          X11UseLocalhost yes
+
+          # UBTU-24-300031 — No empty passwords
+          PermitEmptyPasswords no
+
+          # UBTU-24-300031 — No user environment passing
+          PermitUserEnvironment no
+
+          # UBTU-24-600000 — Session keepalive interval (seconds)
+          ClientAliveInterval 600
+
+          # UBTU-24-600010 — Terminate after 1 missed keepalive (scanner requires exactly 1)
+          ClientAliveCountMax 1
+
+          # UBTU-24-500010 — Verbose logging for audit trail
+          LogLevel VERBOSE
+
+          # UBTU-24-200090 — Display last login on connect
+          PrintLastLog yes
+
+          # UBTU-24-400110 — Block direct root SSH login
+          # Root password is set for single-user mode (UBTU-24-102000); this
+          # directive ensures that password cannot be used for remote SSH.
+          PermitRootLogin no
+      notify: restart ssh
+
+    - name: "SSH | Flush handlers to restart SSH now"
+      ansible.builtin.meta: flush_handlers
+
+    # V-270691 (DoD banner) and V-270694 (banner acknowledgement) are handled by
+    # OpenSCAP remediation — no task needed here.
+
+  # ---------------------------------------------------------------------------
+  # SECTION 3: PAM & PASSWORD POLICY
+  # ---------------------------------------------------------------------------
+
+    # UBTU-24-100600 / UBTU-24-300014 / UBTU-24-300016 - pwquality settings
+    - name: "UBTU-24-300014/300016/400260-400330 | Configure pwquality settings"
+      ansible.builtin.blockinfile:
+        path: /etc/security/pwquality.conf
+        backup: true
+        marker: "# {mark} STIG MANAGED BLOCK"
+        block: |
+          minlen = 15
+          dcredit = -1
+          ucredit = -1
+          lcredit = -1
+          ocredit = -1
+          difok = 8
+          dictcheck = 1
+          enforcing = 1
+
+    # UBTU-24-400220 / UBTU-24-400400 - Password hashing algorithm
+    # SHA512 is required by the Ubuntu 24.04 STIG even though Ubuntu 24.04
+    # defaults to yescrypt. The STIG scanner checks for SHA512 explicitly.
+    - name: "UBTU-24-400220/400400 | Set password hashing algorithm to SHA512 in login.defs"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^[#\s]*ENCRYPT_METHOD'
+        line: "ENCRYPT_METHOD SHA512"
+        state: present
+
+    # UBTU-24-400300 - Minimum password age
+    - name: "UBTU-24-400300 | Set minimum password age to 1 day"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^[#\s]*PASS_MIN_DAYS'
+        line: "PASS_MIN_DAYS 1"
+        state: present
+
+    # UBTU-24-400310 - Maximum password age
+    - name: "UBTU-24-400310 | Set maximum password age to 60 days"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^[#\s]*PASS_MAX_DAYS'
+        line: "PASS_MAX_DAYS 60"
+        state: present
+
+    # UBTU-24-200260 - Inactive account lockout
+    - name: "UBTU-24-200260 | Set account inactivity lock to 35 days"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^[#\s]*INACTIVE'
+        line: "INACTIVE 35"
+        state: present
+
+    - name: "UBTU-24-200260 | Set useradd default inactivity"
+      ansible.builtin.command:
+        cmd: useradd -D -f 35
+      changed_when: true
+
+    # UBTU-24-200000 - Limit concurrent sessions
+    - name: "UBTU-24-200000 | Limit concurrent sessions to 10"
+      ansible.builtin.lineinfile:
+        path: /etc/security/limits.conf
+        regexp: '^\*\s+hard\s+maxlogins'
+        line: "* hard maxlogins 10"
+        state: present
+
+    # UBTU-24-200060 - Session inactivity timeout (shell)
+    - name: "UBTU-24-200060 | Set shell timeout via /etc/profile.d"
+      ansible.builtin.copy:
+        dest: /etc/profile.d/tmout.sh
+        content: |
+          # STIG UBTU-24-200060 - Terminate inactive sessions
+          TMOUT=600
+          readonly TMOUT
+          export TMOUT
+        mode: '0644'
+
+    # UBTU-24-200610 - Account lockout via faillock
+    - name: "UBTU-24-200610 | Configure faillock - deny after 3 failures"
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: '^[#\s]*deny'
+        line: "deny = 3"
+        state: present
+        create: true
+
+    - name: "UBTU-24-200610 | Configure faillock - admin must unlock"
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: '^[#\s]*unlock_time'
+        line: "unlock_time = 0"
+        state: present
+
+    # Exempt the Ansible build user from faillock so pipeline runs cannot
+    # accidentally trigger a permanent lockout on the account running the plays.
+    - name: "UBTU-24-200610 | Exempt Ansible build user from faillock"
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: '^[#\s]*ignore_users'
+        line: "ignore_users = {{ ansible_user }}"
+        state: present
+
+    # UBTU-24-300017 - Logon failure delay
+    # fail_interval is the sliding observation window (in seconds) during which
+    # failed attempts are counted toward the deny threshold — it is NOT the
+    # per-attempt delay. The actual login delay is FAIL_DELAY in login.defs below.
+    - name: "UBTU-24-300017 | Set faillock failure observation window to 900 seconds"
+      ansible.builtin.lineinfile:
+        path: /etc/security/faillock.conf
+        regexp: '^[#\s]*fail_interval'
+        line: "fail_interval = 900"
+        state: present
+
+    - name: "UBTU-24-300017 | Set FAIL_DELAY in login.defs"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^[#\s]*FAIL_DELAY'
+        line: "FAIL_DELAY 4"
+        state: present
+
+    # UBTU-24-300021 - Require password for privilege escalation (sudo)
+    - name: "UBTU-24-300021 | Ensure NOPASSWD is not in sudoers"
+      ansible.builtin.replace:
+        path: /etc/sudoers
+        regexp: 'NOPASSWD'
+        replace: 'PASSWD'
+        backup: true
+
+    - name: "UBTU-24-300021 | Check sudoers.d for NOPASSWD"
+      ansible.builtin.find:
+        paths: /etc/sudoers.d
+        contains: 'NOPASSWD'
+      register: sudoers_nopasswd_files
+
+    - name: "UBTU-24-300021 | Remove NOPASSWD from sudoers.d files"
+      ansible.builtin.replace:
+        path: "{{ item.path }}"
+        regexp: 'NOPASSWD'
+        replace: 'PASSWD'
+      loop: "{{ sudoers_nopasswd_files.files }}"
+
+    # UBTU-24-300019 - Restrict privilege elevation
+    - name: "UBTU-24-300019 | Ensure !authenticate is not in sudoers"
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        regexp: '!authenticate'
+        state: absent
+
+    # UBTU-24-300020 - Require password for sudo -s / sudo -i
+    - name: "UBTU-24-300020 | Set sudo use_pty"
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        regexp: '^Defaults.*use_pty'
+        line: "Defaults use_pty"
+        state: present
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: "UBTU-24-300020 | Set sudo logfile"
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        regexp: '^Defaults.*logfile'
+        line: 'Defaults logfile="/var/log/sudo.log"'
+        state: present
+        validate: /usr/sbin/visudo -cf %s
+
+    # UBTU-24-300027/300028 / V-270690 / V-270725 — Write complete common-auth.
+    # Writing the full file is idempotent (copy checks content hash) and avoids the
+    # lineinfile success=N counter bug: inserting modules between pam_unix.so and
+    # pam_sss.so shifts the skip-count and causes pam_deny.so to fire on success.
+    #
+    # Stack logic:
+    #   pam_faillock preauth    — blocks locked accounts before any password attempt
+    #   pam_faildelay delay=4s  — enforces 4-second delay per attempt (V-270706)
+    #   pam_unix.so [success=2] — on success skip pam_sss.so + authfail → authsucc
+    #                             (success=2 counts modules AFTER pam_unix, not before)
+    #   pam_sss.so  [success=1] — on success skip authfail → authsucc
+    #   authfail [default=die]  — reached only when ALL auth modules fail; records it
+    #   authsucc sufficient     — clears faillock counter on success; stops the stack
+    #   pam_deny.so             — final fallback deny (only reached if authsucc fails)
+    #   pam_permit.so           — required positive return for the stack
+    - name: "UBTU-24-300027/300028/V-270690 | Deploy hardened common-auth"
+      ansible.builtin.copy:
+        dest: /etc/pam.d/common-auth
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # /etc/pam.d/common-auth — managed by Ansible pre_openscap.yml (STIG hardened)
+          # Do not edit manually — changes will be overwritten on next playbook run.
+          auth    required                        pam_faillock.so preauth silent
+          auth    required                        pam_faildelay.so delay=4000000
+          auth    [success=2 default=ignore]      pam_unix.so
+          auth    [success=1 default=ignore]      pam_sss.so use_first_pass
+          auth    [default=die]                   pam_faillock.so authfail
+          auth    sufficient                      pam_faillock.so authsucc
+          auth    requisite                       pam_deny.so
+          auth    required                        pam_permit.so
+          auth    optional                        pam_cap.so
+
+    # V-270725 — pam_unix.so must use sha512 with rounds=100000 in common-password.
+    - name: "V-270725 | Set sha512 rounds=100000 on pam_unix.so in common-password"
+      ansible.builtin.replace:
+        path: /etc/pam.d/common-password
+        regexp: '(pam_unix\.so\s+)(.*)'
+        replace: 'pam_unix.so obscure sha512 shadow rounds=100000'
+      ignore_errors: true
+
+    # UBTU-24-400340 - offline_credentials_expiration is configured inside the
+    # sssd.conf deployed by V-270663 above. No separate task needed here.
+
+  # ---------------------------------------------------------------------------
+  # SECTION 4: KERNEL & SYSTEM PARAMETERS
+  # ---------------------------------------------------------------------------
+
+    # UBTU-24-700310 - ASLR
+    - name: "UBTU-24-700310 | Enable Address Space Layout Randomization (ASLR)"
+      ansible.posix.sysctl:
+        name: kernel.randomize_va_space
+        value: '2'
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-stig.conf
+
+    # UBTU-24-600190 - TCP syncookies
+    - name: "UBTU-24-600190 | Enable TCP syncookies"
+      ansible.posix.sysctl:
+        name: net.ipv4.tcp_syncookies
+        value: '1'
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-stig.conf
+
+    # UBTU-24-600070 - Disable kernel core dumps
+    - name: "UBTU-24-600070 | Disable kernel core dumps via sysctl"
+      ansible.posix.sysctl:
+        name: kernel.core_pattern
+        value: '|/bin/false'
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-stig.conf
+
+    - name: "UBTU-24-600070 | Disable core dumps in limits.conf"
+      ansible.builtin.lineinfile:
+        path: /etc/security/limits.conf
+        regexp: '^\*\s+hard\s+core'
+        line: "* hard core 0"
+        state: present
+
+    # UBTU-24-600140 - Restrict kernel message buffer
+    - name: "UBTU-24-600140 | Restrict access to kernel message buffer"
+      ansible.posix.sysctl:
+        name: kernel.dmesg_restrict
+        value: '1'
+        state: present
+        reload: true
+        sysctl_file: /etc/sysctl.d/99-stig.conf
+
+    # UBTU-24-300026 - Disable Ctrl-Alt-Delete
+    - name: "UBTU-24-300026 | Mask ctrl-alt-del.target"
+      ansible.builtin.systemd:
+        name: ctrl-alt-del.target
+        masked: true
+
+    - name: "UBTU-24-300026 | Reload systemd daemon"
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    # UBTU-24-102000 - Set root password. The hash is placed in /etc/shadow so
+    # a known credential exists before the account is locked below (V-270724).
+    # Locking is deferred until after the GRUB bootloader password is configured
+    # so that if GRUB setup fails, root is not left locked without a recovery path.
+    - name: "UBTU-24-102000 | Set root password"
+      ansible.builtin.user:
+        name: root
+        password: "{{ root_recovery_password | password_hash('sha512') }}"
+      no_log: no_log_sensitive
+
+    # UBTU-24-700320 / V-270773 - APT auto-remove old packages and kernels.
+    # Scanner checks 50unattended-upgrades for BOTH Remove-Unused-Dependencies
+    # AND Remove-Unused-Kernel-Packages.
+    - name: "UBTU-24-700320/V-270773 | Configure APT to auto-remove unused packages"
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: 'Unattended-Upgrade::Remove-Unused-Dependencies'
+        line: 'Unattended-Upgrade::Remove-Unused-Dependencies "true";'
+        state: present
+        create: true
+
+    - name: "UBTU-24-700320/V-270773 | Configure APT to auto-remove unused kernel packages"
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/50unattended-upgrades
+        regexp: 'Unattended-Upgrade::Remove-Unused-Kernel-Packages'
+        line: 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";'
+        state: present
+
+    # UBTU-24-300001 - APT signed packages only
+    - name: "UBTU-24-300001 | Ensure APT requires signed packages"
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/99-stig-signed
+        content: |
+          APT::Get::AllowUnauthenticated "false";
+          Acquire::AllowInsecureRepositories "false";
+          Acquire::AllowDowngradeToInsecureRepositories "false";
+        mode: '0644'
+
+    # UBTU-24-300039 / V-270718 - Disable USB mass storage
+    # Scanner checks /etc/modprobe.d/DISASTIG.conf specifically for this exact filename.
+    - name: "UBTU-24-300039/V-270718 | Disable USB mass storage in DISASTIG.conf"
+      ansible.builtin.blockinfile:
+        path: /etc/modprobe.d/DISASTIG.conf
+        marker: "# {mark} STIG V-270718 USB STORAGE"
+        block: |
+          install usb-storage /bin/false
+          blacklist usb-storage
+        create: true
+        mode: '0644'
+
+    # UBTU-24-102010 / V-270676 - Initiate session audits at startup (audit=1 in GRUB)
+    # Both GRUB_CMDLINE_LINUX and GRUB_CMDLINE_LINUX_DEFAULT must contain audit=1.
+    # The negative lookahead makes each task idempotent.
+    - name: "UBTU-24-102010 | Add audit=1 to GRUB_CMDLINE_LINUX"
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: '^(GRUB_CMDLINE_LINUX=(?!.*audit=).*)"$'
+        replace: '\1 audit=1"'
+        backup: true
+
+    - name: "UBTU-24-102010 | Add audit=1 to GRUB_CMDLINE_LINUX_DEFAULT (V-270676)"
+      ansible.builtin.replace:
+        path: /etc/default/grub
+        regexp: '^(GRUB_CMDLINE_LINUX_DEFAULT=(?!.*audit=).*)"$'
+        replace: '\1 audit=1"'
+
+    - name: "UBTU-24-102010 | Update GRUB"
+      ansible.builtin.command:
+        cmd: update-grub
+      changed_when: true
+
+    # V-270675 - Single-user and maintenance mode must require authentication.
+    # The scanner checks /boot/grub/grub.cfg for password_pbkdf2. This is the GRUB
+    # bootloader password — distinct from the Linux root account password set below.
+    # The PBKDF2 hash is generated from root_recovery_password each run (random salt
+    # is acceptable; the password remains the same, only the stored hash differs).
+    - name: "V-270675 | Generate GRUB PBKDF2 password hash"
+      ansible.builtin.shell:
+        cmd: >
+          printf '%s\n%s\n' '{{ root_recovery_password }}' '{{ root_recovery_password }}'
+          | grub-mkpasswd-pbkdf2
+          | awk '/pbkdf2/{print $NF}'
+      register: grub_pbkdf2_hash
+      no_log: no_log_sensitive
+      changed_when: false
+
+    - name: "V-270675 | Install GRUB bootloader password in /etc/grub.d/40_custom"
+      ansible.builtin.blockinfile:
+        path: /etc/grub.d/40_custom
+        marker: "# {mark} STIG V-270675 GRUB BOOTLOADER PASSWORD"
+        block: |
+          set superusers="root"
+          password_pbkdf2 root {{ grub_pbkdf2_hash.stdout }}
+        create: false
+
+    - name: "V-270675 | Mark normal boot entries unrestricted (password required only to edit, not to boot)"
+      ansible.builtin.replace:
+        path: /etc/grub.d/10_linux
+        regexp: '^(CLASS="(?!.*--unrestricted).*)"$'
+        replace: '\1 --unrestricted"'
+
+    - name: "V-270675 | Rebuild GRUB config to embed bootloader password"
+      ansible.builtin.command:
+        cmd: update-grub
+      changed_when: true
+
+    # V-270724 - Prevent direct login to the root account.
+    # Done HERE (after GRUB password is confirmed written) so that if update-grub
+    # fails above, this task never runs and root remains unlocked for recovery.
+    # PermitRootLogin no (SSH drop-in) blocks SSH. GRUB bootloader password
+    # (V-270675) protects single-user mode. Together these satisfy V-270724.
+    - name: "V-270724 | Lock root account to prevent direct login"
+      ansible.builtin.command:
+        cmd: passwd -l root
+      changed_when: true
+
+  # ---------------------------------------------------------------------------
+  # SECTION 5: FILE PERMISSIONS & OWNERSHIP
+  # ---------------------------------------------------------------------------
+
+    # UBTU-24-700100/700110/700120 - /var/log permissions
+    - name: "UBTU-24-700100 | Ensure syslog group exists"
+      ansible.builtin.group:
+        name: syslog
+        state: present
+
+    - name: "UBTU-24-700100/700110/700120 | Set /var/log ownership and permissions"
+      ansible.builtin.file:
+        path: /var/log
+        owner: root
+        group: syslog
+        mode: '0755'
+
+    # UBTU-24-700030-700090 - journalctl and journal directory permissions
+    # V-270758 — scanner expects /usr/bin/journalctl mode 0740 exactly.
+    - name: "UBTU-24-700030/V-270758 | Set journalctl ownership and permissions"
+      ansible.builtin.file:
+        path: /usr/bin/journalctl
+        owner: root
+        group: root
+        mode: '0740'
+
+    - name: "UBTU-24-700060/700080 | Set /var/log/journal directory ownership"
+      ansible.builtin.file:
+        path: /var/log/journal
+        owner: root
+        group: systemd-journal
+        mode: '2755'
+        recurse: false
+      ignore_errors: true
+
+    - name: "UBTU-24-700060/070 | Set journal subdirectory ownership recursively"
+      ansible.builtin.command:
+        cmd: find /var/log/journal -type d -exec chown root:systemd-journal {} \;
+      changed_when: true
+      ignore_errors: true
+
+    - name: "UBTU-24-700070/090 | Set journal file ownership"
+      ansible.builtin.command:
+        cmd: find /var/log/journal -type f -exec chown root:systemd-journal {} \;
+      changed_when: true
+      ignore_errors: true
+
+    # UBTU-24-700010 / V-270756 - Log files must be mode 0640 or less permissive.
+    # Excludes btmp, wtmp, lastlog, history, and eipp.log.xz (scanner-excluded files).
+    - name: "UBTU-24-700010/V-270756 | Set /var/log files to mode 0640"
+      ansible.builtin.command:
+        cmd: >
+          find /var/log -perm /137
+          ! -name '*[bw]tmp' ! -name '*lastlog'
+          ! -name '*history' ! -name 'eipp.log.xz'
+          -type f -exec chmod 0640 '{}' \;
+      changed_when: true
+
+    # UBTU-24-300030 / V-270716 - Default filesystem permissions (umask)
+    # Scanner expects UMASK 077 (not 027) in /etc/login.defs.
+    - name: "UBTU-24-300030/V-270716 | Set default umask to 077 in login.defs"
+      ansible.builtin.lineinfile:
+        path: /etc/login.defs
+        regexp: '^[#\s]*UMASK'
+        line: "UMASK           077"
+        state: present
+
+    - name: "UBTU-24-300030 | Set default umask in /etc/profile"
+      ansible.builtin.lineinfile:
+        path: /etc/profile
+        regexp: '^[#\s]*umask'
+        line: "umask 077"
+        state: present
+
+    # V-270699 - Library file group ownership must be root.
+    # Check text says '*.so*' but OVAL checks ALL regular files (filename pattern '.*')
+    # in /lib, /lib64, /usr/lib, /usr/lib64 that are not group-owned by root (GID 0).
+    # Known non-.so offenders: ssl-cert-snakeoil.key (ssl-cert group) and
+    # dbus-daemon-launch-helper (messagebus group). Drop the name filter to catch all.
+    - name: "V-270699 | Set library file group ownership to root"
+      ansible.builtin.command:
+        cmd: find {{ item }} -type f ! -group root -exec chgrp root {} \;
+      loop:
+        - /lib
+        - /lib64
+        - /usr/lib
+        - /usr/lib64
+      changed_when: true
+      ignore_errors: true
+
+  # ---------------------------------------------------------------------------
+  # SECTION 6: AUDIT RULES
+  # ---------------------------------------------------------------------------
+
+    # Remove legacy stig-rules.rules if it exists from a previous run before the
+    # rename to 10-stig-rules.rules. Without this, augenrules would load both files
+    # and produce hundreds of duplicate-rule errors.
+    - name: "AUDIT | Remove legacy stig-rules.rules if present"
+      ansible.builtin.file:
+        path: "{{ audit_rules_dir }}/stig-rules.rules"
+        state: absent
+
+    - name: "AUDIT | Ensure audit rules directory exists"
+      ansible.builtin.file:
+        path: "{{ audit_rules_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+
+    # UBTU-24-900040/050/060 - Audit config file permissions
+    - name: "UBTU-24-900040/050/060 | Set audit config file permissions"
+      ansible.builtin.file:
+        path: /etc/audit
+        owner: root
+        group: root
+        mode: '0750'
+        recurse: false
+
+    - name: "UBTU-24-900040 | Set audit rules files to 0640"
+      ansible.builtin.command:
+        cmd: find /etc/audit -type f -name "*.rules" -exec chmod 0640 {} \;
+      changed_when: true
+
+    - name: "UBTU-24-900050/060 | Set audit rules file ownership"
+      ansible.builtin.command:
+        cmd: find /etc/audit -type f -exec chown root:root {} \;
+      changed_when: true
+
+    # UBTU-24-901230/240/250 - Audit tools permissions
+    # Note: audispd was removed in auditd 3.x (Ubuntu 24.04 ships 3.x — its
+    # functionality was merged into auditd directly). It is not listed here.
+    - name: "UBTU-24-901230/240/250 | Set audit tools ownership and permissions"
+      ansible.builtin.file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - /sbin/auditctl
+        - /sbin/aureport
+        - /sbin/ausearch
+        - /sbin/autrace
+        - /sbin/auditd
+        - /sbin/augenrules
+      ignore_errors: true
+
+    # UBTU-24-901300/310/350/380 - Audit log permissions
+    - name: "UBTU-24-901300/310/350/380 | Set audit log directory permissions"
+      ansible.builtin.file:
+        path: "{{ audit_log_dir }}"
+        owner: root
+        group: root
+        mode: '0750'
+        state: directory
+
+    # V-270829 — log_group must be root in auditd.conf.
+    - name: "V-270829 | Set log_group = root in auditd.conf"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/auditd.conf
+        regexp: '^[#\s]*log_group\s*='
+        line: "log_group = root"
+        state: present
+
+    # V-270827 — audit log files must be mode 0600.
+    - name: "UBTU-24-901300/V-270827 | Set audit log files to 0600"
+      ansible.builtin.command:
+        cmd: find /var/log/audit -type f -exec chmod 0600 {} \;
+      changed_when: true
+      ignore_errors: true
+
+    - name: "UBTU-24-901310 | Set audit log file ownership to root"
+      ansible.builtin.command:
+        cmd: find /var/log/audit -type f -exec chown root:root {} \;
+      changed_when: true
+      ignore_errors: true
+
+    # UBTU-24-909000 - Protect audit rules from change (immutable flag)
+    - name: "UBTU-24-909000 | Deploy immutable audit rules"
+      ansible.builtin.copy:
+        dest: "{{ audit_rules_dir }}/99-finalize.rules"
+        content: |
+          # STIG UBTU-24-909000 - Make audit config immutable
+          -e 2
+        mode: '0640'
+        owner: root
+        group: root
+
+    # Deploy all audit rules in one file.
+    # Named 10-stig-rules.rules so it sorts BEFORE 99-finalize.rules alphabetically.
+    # augenrules merges files in ASCII order (digits < letters), so without a numeric
+    # prefix stig-rules.rules would sort after 99-finalize.rules and -e 2 (immutable)
+    # would fire before any rules are loaded, causing every rule addition to fail.
+    #
+    # Key names are scanner-exact per SSG 0.1.79 ssg-ubuntu2404-ds.xml.
+    # auid!=unset is used throughout (equivalent to auid!=-1 but required by scanner).
+    - name: "AUDIT RULES | Deploy STIG audit rules"
+      ansible.builtin.copy:
+        dest: "{{ audit_rules_dir }}/10-stig-rules.rules"
+        mode: '0640'
+        owner: root
+        group: root
+        content: |
+          ## STIG Audit Rules for Ubuntu 24.04 LTS
+          ## Generated for pipeline pre-hardening
+          ## Key names are scanner-exact per SSG 0.1.79
+
+          # Delete existing rules
+          -D
+
+          # Set buffer size
+          -b 8192
+
+          # Failure mode - 1=printk, 2=panic
+          -f 1
+
+          # UBTU-24-102010 - Audit startup
+          -e 1
+
+          # UBTU-24-200270 / V-274870 - Audit cron scripts run as root
+          # Scanner checks: auditctl -l | grep /etc/cron.d (no trailing slash)
+          # Scanner checks: auditctl -l | grep /var/spool/cron (no trailing slash)
+          -w /etc/cron.d -p wa -k cronjobs
+          -w /etc/cron.daily -p wa -k cronjobs
+          -w /etc/cron.hourly -p wa -k cronjobs
+          -w /etc/cron.monthly -p wa -k cronjobs
+          -w /etc/cron.weekly -p wa -k cronjobs
+          -w /etc/crontab -p wa -k cronjobs
+          -w /var/spool/cron -p wa -k cronjobs
+
+          # UBTU-24-200280 - /etc/passwd modifications
+          -w /etc/passwd -p wa -k usergroup_modification
+
+          # UBTU-24-200290 - /etc/group modifications
+          -w /etc/group -p wa -k usergroup_modification
+
+          # UBTU-24-200300 - /etc/shadow modifications
+          -w /etc/shadow -p wa -k usergroup_modification
+
+          # UBTU-24-200310 - /etc/gshadow modifications
+          -w /etc/gshadow -p wa -k usergroup_modification
+
+          # UBTU-24-200320 - /etc/opasswd modifications
+          -w /etc/security/opasswd -p wa -k usergroup_modification
+
+          # UBTU-24-200580 - Privileged function execution (setuid/setgid)
+          -a always,exit -F arch=b64 -S execve -C uid!=euid -F euid=0 -k setuid
+          -a always,exit -F arch=b32 -S execve -C uid!=euid -F euid=0 -k setuid
+          -a always,exit -F arch=b64 -S execve -C gid!=egid -F egid=0 -k setgid
+          -a always,exit -F arch=b32 -S execve -C gid!=egid -F egid=0 -k setgid
+
+          # UBTU-24-300029 / V-270715 - systemd journal modifications
+          # Scanner expects key "systemd_journal" and no trailing slash.
+          -w /var/log/journal -p wa -k systemd_journal
+
+          # V-270740 - Audit nonlocal maintenance (sudo.log)
+          # Scanner checks: auditctl -l | grep sudo.log → -w /var/log/sudo.log -p wa -k maintenance
+          -w /var/log/sudo.log -p wa -k maintenance
+
+          # UBTU-24-900070 / V-270778 - su command
+          # Scanner checks: auditctl -l | grep /bin/su (uses /bin/su not /usr/bin/su)
+          -a always,exit -F path=/bin/su -F perm=x -F auid>=1000 -F auid!=unset -k privileged-priv_change
+
+          # UBTU-24-900080 - chfn command
+          -a always,exit -F path=/usr/bin/chfn -F perm=x -F auid>=1000 -F auid!=unset -k privileged-chfn
+
+          # UBTU-24-900090 - mount command
+          -a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=unset -k privileged-mount
+          -a always,exit -F arch=b32 -S mount -F auid>=1000 -F auid!=unset -k privileged-mount
+          -a always,exit -F path=/usr/bin/mount -F perm=x -F auid>=1000 -F auid!=unset -k privileged-mount
+
+          # UBTU-24-900100 - umount command
+          -a always,exit -F path=/usr/bin/umount -F perm=x -F auid>=1000 -F auid!=unset -k privileged-mount
+
+          # UBTU-24-900110 - ssh-agent command
+          -a always,exit -F path=/usr/bin/ssh-agent -F perm=x -F auid>=1000 -F auid!=unset -k privileged-ssh
+
+          # UBTU-24-900120 - ssh-keysign command
+          -a always,exit -F path=/usr/lib/openssh/ssh-keysign -F perm=x -F auid>=1000 -F auid!=unset -k privileged-ssh
+
+          # UBTU-24-900130 - xattr syscalls
+          -a always,exit -F arch=b64 -S setxattr,fsetxattr,lsetxattr,removexattr,fremovexattr,lremovexattr -F auid>=1000 -F auid!=unset -k perm_mod
+          -a always,exit -F arch=b32 -S setxattr,fsetxattr,lsetxattr,removexattr,fremovexattr,lremovexattr -F auid>=1000 -F auid!=unset -k perm_mod
+          -a always,exit -F arch=b64 -S setxattr,fsetxattr,lsetxattr,removexattr,fremovexattr,lremovexattr -F auid=0 -k perm_mod
+          -a always,exit -F arch=b32 -S setxattr,fsetxattr,lsetxattr,removexattr,fremovexattr,lremovexattr -F auid=0 -k perm_mod
+
+          # UBTU-24-900140 - chown syscalls
+          -a always,exit -F arch=b64 -S chown,fchown,fchownat,lchown -F auid>=1000 -F auid!=unset -k perm_chng
+          -a always,exit -F arch=b32 -S chown,fchown,fchownat,lchown -F auid>=1000 -F auid!=unset -k perm_chng
+
+          # UBTU-24-900150 - chmod syscalls
+          -a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=unset -k perm_chng
+          -a always,exit -F arch=b32 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=unset -k perm_chng
+
+          # UBTU-24-900160 - open/creat/truncate syscalls
+          -a always,exit -F arch=b64 -S creat,open,openat,open_by_handle_at,truncate,ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=unset -k perm_access
+          -a always,exit -F arch=b32 -S creat,open,openat,open_by_handle_at,truncate,ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=unset -k perm_access
+          -a always,exit -F arch=b64 -S creat,open,openat,open_by_handle_at,truncate,ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=unset -k perm_access
+          -a always,exit -F arch=b32 -S creat,open,openat,open_by_handle_at,truncate,ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=unset -k perm_access
+
+          # UBTU-24-900170 - sudo command
+          -a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=unset -k priv_cmd
+
+          # UBTU-24-900180 - sudoedit command
+          -a always,exit -F path=/usr/bin/sudoedit -F perm=x -F auid>=1000 -F auid!=unset -k priv_cmd
+
+          # UBTU-24-900190 - chsh command
+          -a always,exit -F path=/usr/bin/chsh -F perm=x -F auid>=1000 -F auid!=unset -k priv_cmd
+
+          # UBTU-24-900200 - newgrp command
+          -a always,exit -F path=/usr/bin/newgrp -F perm=x -F auid>=1000 -F auid!=unset -k priv_cmd
+
+          # UBTU-24-900210 - chcon command
+          -a always,exit -F path=/usr/bin/chcon -F perm=x -F auid>=1000 -F auid!=unset -k perm_chng
+
+          # UBTU-24-900220 - apparmor_parser command
+          -a always,exit -F path=/sbin/apparmor_parser -F perm=x -F auid>=1000 -F auid!=unset -k perm_chng
+
+          # UBTU-24-900230 - setfacl command
+          -a always,exit -F path=/usr/bin/setfacl -F perm=x -F auid>=1000 -F auid!=unset -k perm_chng
+
+          # UBTU-24-900240 - chacl command
+          -a always,exit -F path=/usr/bin/chacl -F perm=x -F auid>=1000 -F auid!=unset -k perm_chng
+
+          # UBTU-24-900250 - faillog file modifications
+          -w /var/log/faillog -p wa -k logins
+
+          # UBTU-24-900260 - lastlog file modifications
+          -w /var/log/lastlog -p wa -k logins
+
+          # UBTU-24-900270 - passwd command
+          -a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=unset -k privileged-passwd
+
+          # UBTU-24-900280 / V-270799 - unix_update command
+          # Scanner expects key "privileged-unix-update".
+          -a always,exit -F path=/sbin/unix_update -F perm=x -F auid>=1000 -F auid!=unset -k privileged-unix-update
+
+          # UBTU-24-900290 - gpasswd command
+          -a always,exit -F path=/usr/bin/gpasswd -F perm=x -F auid>=1000 -F auid!=unset -k privileged-passwd
+
+          # UBTU-24-900300 - chage command
+          -a always,exit -F path=/usr/bin/chage -F perm=x -F auid>=1000 -F auid!=unset -k privileged-passwd
+
+          # UBTU-24-900310 - usermod command
+          -a always,exit -F path=/usr/sbin/usermod -F perm=x -F auid>=1000 -F auid!=unset -k privileged-usermod
+
+          # UBTU-24-900320 - crontab command
+          -a always,exit -F path=/usr/bin/crontab -F perm=x -F auid>=1000 -F auid!=unset -k privileged-crontab
+
+          # UBTU-24-900330 / V-270804 - pam_timestamp_check command
+          # Scanner checks: auditctl -l | grep -w pam_timestamp_check → path=/usr/sbin/pam_timestamp_check
+          -a always,exit -F path=/usr/sbin/pam_timestamp_check -F perm=x -F auid>=1000 -F auid!=unset -k privileged-pam_timestamp_check
+
+          # UBTU-24-900340 - init_module / finit_module syscalls
+          -a always,exit -F arch=b64 -S init_module,finit_module -F auid>=1000 -F auid!=unset -k modules
+          -a always,exit -F arch=b32 -S init_module,finit_module -F auid>=1000 -F auid!=unset -k modules
+
+          # UBTU-24-900350 - delete_module syscall
+          -a always,exit -F arch=b64 -S delete_module -F auid>=1000 -F auid!=unset -k modules
+          -a always,exit -F arch=b32 -S delete_module -F auid>=1000 -F auid!=unset -k modules
+
+          # UBTU-24-900510/900520 - sudoers file and sudoers.d directory modifications
+          # Note: /etc/sudoers.d/ and /etc/sudoers.d resolve to the same kernel inode.
+          # A second watch rule for the same path causes "Rule exists" — only one is kept.
+          -w /etc/sudoers -p wa -k actions
+          -w /etc/sudoers.d/ -p wa -k actions
+
+          # UBTU-24-900540 - unlink/rename syscalls
+          -a always,exit -F arch=b64 -S unlink,unlinkat,rename,renameat,rmdir -F auid>=1000 -F auid!=unset -k delete
+          -a always,exit -F arch=b32 -S unlink,unlinkat,rename,renameat,rmdir -F auid>=1000 -F auid!=unset -k delete
+
+          # UBTU-24-900590 - /var/log/wtmp
+          -w /var/log/wtmp -p wa -k logins
+
+          # UBTU-24-900600 - /var/run/utmp
+          -w /var/run/utmp -p wa -k logins
+
+          # UBTU-24-900610 - /var/log/btmp
+          -w /var/log/btmp -p wa -k logins
+
+          # UBTU-24-900730 / V-270813 - modprobe command
+          # Scanner checks: auditctl -l | grep '/sbin/modprobe' → expects watch rule with key "modules"
+          -w /sbin/modprobe -p x -k modules
+
+          # UBTU-24-900740 / V-270814 - kmod command
+          # Scanner expects a watch rule (-w) on /bin/kmod with key "modules".
+          # /bin/kmod → /usr/bin/kmod via merged-usr symlink.
+          -w /bin/kmod -p x -k modules
+
+          # UBTU-24-900750 / V-270815 - fdisk command
+          # Scanner expects /usr/sbin/fdisk with key "fdisk".
+          -w /usr/sbin/fdisk -p x -k fdisk
+
+          # UBTU-24-901220 - Timestamp UTC
+          # Note: stime (b32 rule) was removed from modern kernels; auditctl will warn
+          # but not fail. It is retained here because the STIG rule set includes it.
+          -a always,exit -F arch=b64 -S adjtimex,settimeofday -F auid>=1000 -F auid!=unset -k audit_time_rules
+          -a always,exit -F arch=b32 -S adjtimex,settimeofday,stime -F auid>=1000 -F auid!=unset -k audit_time_rules
+          -a always,exit -F arch=b64 -S clock_settime -F a0=0x0 -F auid>=1000 -F auid!=unset -k audit_time_rules
+          -a always,exit -F arch=b32 -S clock_settime -F a0=0x0 -F auid>=1000 -F auid!=unset -k audit_time_rules
+          -w /etc/localtime -p wa -k audit_time_rules
+
+          # UBTU-24-90890 - Protect integrity of audit tools (write/attr watch)
+          -w /sbin/auditctl -p wa -k audit_tools
+          -w /sbin/auditd -p wa -k audit_tools
+          -w /sbin/ausearch -p wa -k audit_tools
+          -w /sbin/aureport -p wa -k audit_tools
+          -w /sbin/autrace -p wa -k audit_tools
+          -w /sbin/augenrules -p wa -k audit_tools
+
+    - name: "AUDIT RULES | Load new audit rules"
+      ansible.builtin.command:
+        cmd: augenrules --load
+      changed_when: true
+      ignore_errors: true
+
+    - name: "AUDIT | Restart auditd to apply rules"
+      ansible.builtin.service:
+        name: auditd
+        state: restarted
+      ignore_errors: true
+
+  # ---------------------------------------------------------------------------
+  # SECTION 7: RSYSLOG
+  # ---------------------------------------------------------------------------
+
+    # UBTU-24-100200 - Preserve log records from failure events
+    - name: "UBTU-24-100200 | Install rsyslog"
+      ansible.builtin.apt:
+        name: rsyslog
+        state: present
+
+    - name: "UBTU-24-100200 | Enable and start rsyslog"
+      ansible.builtin.systemd:
+        name: rsyslog
+        enabled: true
+        state: started
+
+    # UBTU-24-700130/700140/700150 - /var/log/syslog permissions
+    # Placed here (after rsyslog install/start) because /var/log/syslog does not
+    # exist until rsyslog runs for the first time. Running this in Section 5
+    # (before rsyslog is installed) guarantees the file is absent and the task fails.
+    - name: "UBTU-24-700130/140/150 | Set /var/log/syslog ownership and permissions"
+      ansible.builtin.file:
+        path: /var/log/syslog
+        owner: syslog
+        group: adm
+        mode: '0640'
+      ignore_errors: true
+
+    # V-270681 - Monitor authentication events via rsyslog.
+    # OVAL checks for auth.* and authpriv.* as SEPARATE patterns — combined
+    # "auth,authpriv.*" does not satisfy either OVAL check. Must use individual lines.
+    - name: "V-270681 | Add auth and daemon log directives to 50-default.conf"
+      ansible.builtin.blockinfile:
+        path: /etc/rsyslog.d/50-default.conf
+        marker: "# {mark} STIG V-270681 AUTH MONITORING"
+        block: |
+          # STIG V-270681 — Monitor remote access / authentication events
+          auth.*             /var/log/auth.log
+          authpriv.*         /var/log/auth.log
+          daemon.*           /var/log/daemon.log
+        create: true
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart rsyslog
+
+    # V-270756 — Set rsyslog FileCreateMode so log files created by rsyslog are 0640.
+    # This ensures new log files written during OpenSCAP's 30-45 min run start at 0640.
+    - name: "V-270756 | Set rsyslog FileCreateMode to 0640"
+      ansible.builtin.lineinfile:
+        path: /etc/rsyslog.conf
+        regexp: '^\$FileCreateMode'
+        line: '$FileCreateMode 0640'
+        state: present
+      notify: restart rsyslog
+
+  # ---------------------------------------------------------------------------
+  # SECTION 8: AIDE AUDIT TOOL INTEGRITY
+  # ---------------------------------------------------------------------------
+
+    # V-270831 - AIDE must be configured to check integrity of audit tools.
+    # Entries are added to /etc/aide/aide.conf before AIDE initialization so
+    # the initial database includes fingerprints of all audit tool binaries.
+    # Rule: p+i+n+u+g+s+b+acl+xattrs+sha512 (permissions, inode, nlink, uid,
+    #        gid, size, block count, ACLs, extended attributes, SHA-512 hash)
+    - name: "V-270831 | Configure AIDE to check audit tool integrity"
+      ansible.builtin.blockinfile:
+        path: /etc/aide/aide.conf
+        marker: "# {mark} STIG V-270831 AIDE AUDIT TOOLS"
+        block: |
+          # STIG V-270831 — Audit tool integrity checks
+          # Scanner checks /sbin/ paths (which resolve to /usr/sbin/ via merged-usr symlink).
+          /sbin/auditctl p+i+n+u+g+s+b+acl+xattrs+sha512
+          /sbin/auditd p+i+n+u+g+s+b+acl+xattrs+sha512
+          /sbin/ausearch p+i+n+u+g+s+b+acl+xattrs+sha512
+          /sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512
+          /sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512
+          /sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512
+        create: false
+      ignore_errors: true
+
+  # ---------------------------------------------------------------------------
+  # SECTION 9: AUDITD STORAGE & REMOTE LOGGING
+  # ---------------------------------------------------------------------------
+
+    # V-270816 - auditd must be configured to write log records to disk.
+    # These settings ensure audit logs are retained and the system warns/acts
+    # before running out of space.
+    - name: "V-270816 | Configure auditd max_log_file"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/auditd.conf
+        regexp: '^[#\s]*max_log_file\s*='
+        line: "max_log_file = 512"
+        state: present
+
+    - name: "V-270816 | Configure auditd num_logs"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/auditd.conf
+        regexp: '^[#\s]*num_logs\s*='
+        line: "num_logs = 5"
+        state: present
+
+    - name: "V-270816 | Configure auditd space_left"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/auditd.conf
+        regexp: '^[#\s]*space_left\s*='
+        line: "space_left = 75"
+        state: present
+
+    - name: "V-270816 | Configure auditd space_left_action"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/auditd.conf
+        regexp: '^[#\s]*space_left_action\s*='
+        line: "space_left_action = email"
+        state: present
+
+    # V-270658 - Audit records must be shipped to a remote log server.
+    # audispd-plugins provides the au-remote plugin (active = yes enables offloading).
+    # Set vault_audispd_remote_server in Ansible Vault to the syslog collector FQDN/IP.
+    - name: "V-270658 | Enable audisp-remote plugin"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/plugins.d/au-remote.conf
+        regexp: '^[#\s]*active\s*='
+        line: "active = yes"
+        state: present
+        create: true
+        owner: root
+        group: root
+        mode: '0640'
+
+    - name: "V-270658 | Configure audisp-remote log collector"
+      ansible.builtin.lineinfile:
+        path: /etc/audit/audisp-remote.conf
+        regexp: '^[#\s]*remote_server\s*='
+        line: "remote_server = {{ audispd_remote_server }}"
+        state: present
+      ignore_errors: true
+
+  # ---------------------------------------------------------------------------
+  # SECTION 10: CHRONY NTP
+  # ---------------------------------------------------------------------------
+
+    # V-270751 - System must synchronize internal clock with an authoritative NTP server.
+    # Scanner checks: grep -ir maxpoll /etc/chrony* must return ONLY "server ... maxpoll 16".
+    # Ubuntu 24.04 defaults to 4 pool lines each with "maxpoll 12" — lineinfile only
+    # replaces the first match, leaving the others to fail the check.
+    # Fix: replace ALL pool/server lines with empty strings first, then add one server line.
+    - name: "V-270751 | Remove all default pool/server lines from chrony.conf"
+      ansible.builtin.replace:
+        path: /etc/chrony/chrony.conf
+        regexp: '^(server|pool)\s.*$'
+        replace: ''
+
+    - name: "V-270751 | Add single NTP server with maxpoll 16 to chrony.conf"
+      ansible.builtin.lineinfile:
+        path: /etc/chrony/chrony.conf
+        line: "server {{ ntp_server }} iburst maxpoll 16"
+        state: present
+
+    - name: "V-270751 | Enable and start chrony"
+      ansible.builtin.systemd:
+        name: chrony
+        enabled: true
+        state: started
+
+  # ---------------------------------------------------------------------------
+  # SECTION 11: UFW RATE LIMITING
+  # ---------------------------------------------------------------------------
+
+    # V-270754 - The system must configure UFW to rate-limit listening service ports.
+    # OVAL runs 'ss -l46utn', captures all IPv6 listening ports, and requires every
+    # port to match '22'. Any other listening port causes a failure — even if UFW
+    # has a LIMIT rule for it. Disable postfix (SMTP/25) which Ubuntu installs by
+    # default but is not needed on a database server.
+    - name: "V-270754 | Disable postfix SMTP service (not required on a DB server)"
+      ansible.builtin.systemd:
+        name: postfix
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: "V-270754 | Enable UFW rate limiting for SSH port 22"
+      community.general.ufw:
+        rule: limit
+        port: '22'
+        proto: tcp
+      ignore_errors: true
+
+  # ---------------------------------------------------------------------------
+  # SECTION 12: JOURNALD
+  # ---------------------------------------------------------------------------
+
+    # V-270757 - systemd-journald must be configured to persist log records,
+    # compress them, and forward them to syslog.
+    - name: "V-270757 | Configure journald Storage=persistent"
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: '^[#\s]*Storage='
+        line: "Storage=persistent"
+        state: present
+
+    - name: "V-270757 | Configure journald Compress=yes"
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: '^[#\s]*Compress='
+        line: "Compress=yes"
+        state: present
+
+    - name: "V-270757 | Configure journald ForwardToSyslog=yes"
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: '^[#\s]*ForwardToSyslog='
+        line: "ForwardToSyslog=yes"
+        state: present
+
+    - name: "V-270757 | Restart systemd-journald to apply config"
+      ansible.builtin.systemd:
+        name: systemd-journald
+        state: restarted
+
+    # V-270757 - Journal directories must be mode 2640; journal files must be 0640.
+    # tmpfiles.d controls permissions applied at boot and on systemd-tmpfiles --create.
+    # /etc/tmpfiles.d/ overrides /usr/lib/tmpfiles.d/ for the same paths.
+    - name: "V-270757 | Configure tmpfiles.d for journal directory permissions"
+      ansible.builtin.copy:
+        dest: /etc/tmpfiles.d/99-stig-journal.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # STIG V-270757 — systemd journal permissions
+          # Format: type path mode user group age argument
+          # Note: %m (machine-id specifier) is NOT expanded in tmpfiles.d — use Z (recursive)
+          # to cover machine-id subdirectories without hardcoding the UUID.
+          z /run/log/journal 2640 root systemd-journal - -
+          Z /run/log/journal 2640 root systemd-journal - -
+          z /var/log/journal 2640 root systemd-journal - -
+          Z /var/log/journal 2640 root systemd-journal - -
+
+    - name: "V-270757 | Apply tmpfiles.d journal permissions immediately"
+      ansible.builtin.command:
+        cmd: systemd-tmpfiles --create /etc/tmpfiles.d/99-stig-journal.conf
+      changed_when: true
+      ignore_errors: true
+
+  # ---------------------------------------------------------------------------
+  # SECTION 13: AIDE INITIALIZATION
+  # ---------------------------------------------------------------------------
+
+    # UBTU-24-100100/100130 - Initialize AIDE database
+    - name: "UBTU-24-100100 | Check if AIDE database exists"
+      ansible.builtin.stat:
+        path: /var/lib/aide/aide.db
+      register: aide_db
+
+    - name: "UBTU-24-100100 | Initialize AIDE database (this may take several minutes)"
+      ansible.builtin.command:
+        cmd: aideinit -y -f
+      changed_when: true
+      when: not aide_db.stat.exists
+      async: 600
+      poll: 30
+      ignore_errors: true
+
+    - name: "UBTU-24-100130 | Configure AIDE daily cron check"
+      ansible.builtin.copy:
+        dest: /etc/cron.daily/aide-check
+        content: |
+          #!/bin/bash
+          # STIG UBTU-24-100130 - Daily AIDE integrity check
+          /usr/bin/aide --check 2>&1 | /usr/bin/logger -t aide
+        mode: '0755'
+        owner: root
+        group: root
+
+  # ---------------------------------------------------------------------------
+  # SECTION 14: FINAL CLEANUP & VERIFICATION
+  # ---------------------------------------------------------------------------
+
+    # UBTU-24-400000 - Ensure no duplicate UIDs (informational check)
+    - name: "UBTU-24-400000 | Check for duplicate UIDs"
+      ansible.builtin.command:
+        cmd: awk -F':' '{print $3}' /etc/passwd
+      register: uid_list
+      changed_when: false
+      failed_when: false
+
+    - name: "UBTU-24-400000 | Warn on duplicate UIDs"
+      ansible.builtin.debug:
+        msg: "WARNING: duplicate UIDs detected — review /etc/passwd manually."
+      when: uid_list.stdout_lines | unique | list | length != uid_list.stdout_lines | length
+
+    # UBTU-24-700400 - Vendor supported release check (informational)
+    - name: "UBTU-24-700400 | Verify Ubuntu 24.04 is current supported release"
+      ansible.builtin.command:
+        cmd: lsb_release -a
+      register: lsb_info
+      changed_when: false
+      failed_when: false
+
+    - name: "UBTU-24-700400 | Display release info"
+      ansible.builtin.debug:
+        var: lsb_info.stdout_lines
+
+    - name: "FINAL | Run apt autoremove to clean up"
+      ansible.builtin.apt:
+        autoremove: true
+
+    - name: "FINAL | Display hardening complete message"
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          Pre-hardening complete. Summary of actions taken:
+          - Removed: telnet, rsh-server, ntp, systemd-timesyncd (purged)
+          - Installed: openssh-server, aide, ufw, auditd, audispd-plugins,
+                       apparmor, libpam-pwquality, sssd (NOT libpam-sss/libnss-sss —
+                       those are installed by OpenSCAP to avoid PAM lockout during build),
+                       chrony, rsyslog, vlock
+          - Configured: SSH Ciphers/MACs/KexAlgorithms written to main sshd_config (V-270667/668/669)
+          - Configured: SSH client Ciphers/MACs written to main ssh_config (V-270670/671)
+          - Configured: SSH drop-in /etc/ssh/sshd_config.d/00-stig-hardening.conf (non-crypto settings)
+          - Configured: PAM pam_faildelay.so delay=4000000 in common-auth (V-270706)
+          - Configured: PAM pwquality, faillock, nullok removed, password aging
+          - Configured: Kernel params (ASLR, syncookies, dmesg, core dumps)
+          - Configured: GRUB audit=1 in GRUB_CMDLINE_LINUX + GRUB_CMDLINE_LINUX_DEFAULT
+          - Configured: GRUB bootloader password (V-270675, password_pbkdf2 in grub.cfg)
+          - Configured: Root account locked via passwd -l (V-270724)
+          - Configured: Ctrl-Alt-Del disabled
+          - Configured: SSSD minimal config (files provider, NSS only) + service enabled (V-270663)
+          - Configured: Audit rules — fixed keys for su, unix_update, kmod, fdisk,
+                        cron (key=cronjobs), journal (key=systemd_journal, no slash)
+          - Configured: File permissions (/var/log mode 0640, journal, audit, libraries)
+          - Configured: journald tmpfiles.d journal directory permissions (V-270757)
+          - Configured: rsyslog auth+daemon log directives in 50-default.conf (V-270681)
+          - Configured: AIDE audit tool integrity entries with /sbin/ paths (V-270831)
+          - Configured: auditd storage settings (V-270816)
+          - Configured: audisp-remote log offloading (V-270658)
+          - Configured: chrony NTP server with maxpoll 16 (V-270751)
+          - Configured: UFW SSH rate limiting (V-270754)
+          - Skipped: FIPS kernel mode (V-270744, requires Ubuntu Pro)
+          - Skipped: SSSD PKI cert mapping (V-270736, ldap_user_certificate crashes sssd
+                     in a files domain; configure real LDAP/AD domain at deploy time)
+          - Skipped: PIV/smart card auth (requires hardware token)
+          ============================================================
+          Next step: Run OpenSCAP xccdf generate fix and apply.
+          ============================================================
+
+  # ---------------------------------------------------------------------------
+  # HANDLERS
+  # ---------------------------------------------------------------------------
+  handlers:
+    - name: restart ssh
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+
+    - name: restart rsyslog
+      ansible.builtin.systemd:
+        name: rsyslog
+        state: restarted

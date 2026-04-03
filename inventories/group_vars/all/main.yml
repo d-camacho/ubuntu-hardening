@@ -1,0 +1,3 @@
+---
+# group_vars/all/main.yml
+# Non-secret variables for Ubuntu OS STIG hardening.

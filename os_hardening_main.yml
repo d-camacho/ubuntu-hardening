@@ -1,0 +1,11 @@
+---
+# ============================================================
+# os_hardening_main.yml playbook
+# Hardens Ubuntu 24.04 LTS Live Server in two phases
+# pre_openscap.yml addresses OpenSCAP shortcomings 
+# openscap_remediation.yml is a playbook wrapper for OpenSCAP automated remediation 
+# Running both playbooks should result in ~90% compliance
+# ============================================================
+
+- import_playbook: playbooks/pre_openscap.yml
+- import_playbook: playbooks/openscap_remediation.yml

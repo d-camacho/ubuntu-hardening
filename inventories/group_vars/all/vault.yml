@@ -1,0 +1,25 @@
+---
+# group_vars/all/vault.yml
+# Encrypt this file before production use:
+#   ansible-vault encrypt inventories/group_vars/all/vault.yml
+
+# Ansible connection credentials
+# Deployment account used by Ansible SSH (example: "ansible", "deploy", "ubuntu").
+ansible_user: "CHANGE_ME"
+# SSH password for ansible_user when password auth is enabled.
+# Leave as a vault secret even if you usually use SSH keys.
+ansible_ssh_pass: "CHANGE_ME"
+# Sudo/become password for ansible_user.
+ansible_become_pass: "CHANGE_ME"
+
+# OS STIG variables consumed by pre_openscap.yml
+# Root recovery credential used for single-user/maintenance recovery paths.
+# Store plaintext here only before vault encryption.
+vault_root_recovery_password: "CHANGE_ME"
+# Central audit collector for V-270658 remote audit offload.
+# Use a real IPv4 address for SCC/OVAL reliability (avoid placeholders in production).
+vault_audispd_remote_server: "192.0.2.1"    # Replace with your real audit/log collector IPv4; use an IP for SCC/OVAL reliability.
+# Authoritative time source for V-270751 (clock synchronization).
+# Set to your approved NTP server FQDN/IP (USNO/NIPR or enterprise time source).
+# The hardening playbook writes this as the single chrony server with maxpoll 16.
+vault_ntp_server: "tick.usno.navy.mil"

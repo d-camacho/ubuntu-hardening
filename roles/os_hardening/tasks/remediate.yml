@@ -1,0 +1,71 @@
+---
+# ============================================================
+# remediate.yml — Generate and apply OpenSCAP STIG fix script
+# Gated by sentinel file — skipped if already run on this host.
+# ============================================================
+
+- name: Check for remediation sentinel
+  ansible.builtin.stat:
+    path: "{{ os_stig_sentinel_file }}"
+  register: _sentinel
+  tags: [os_hardening, remediate]
+
+- name: Generate STIG remediation script
+  ansible.builtin.shell:
+    cmd: >
+      oscap xccdf generate fix
+      --profile {{ os_stig_profile }}
+      {{ os_stig_ds_file }}
+      > /tmp/os_stig_fix.sh
+  args:
+    creates: /tmp/os_stig_fix.sh
+  when: not _sentinel.stat.exists
+  tags: [os_hardening, remediate]
+
+- name: Make remediation script executable
+  ansible.builtin.file:
+    path: /tmp/os_stig_fix.sh
+    mode: "0700"
+  when: not _sentinel.stat.exists
+  tags: [os_hardening, remediate]
+
+- name: Apply STIG remediation script
+  ansible.builtin.command:
+    cmd: /tmp/os_stig_fix.sh
+  register: _remediation_ran
+  when: not _sentinel.stat.exists
+  # The generated fix script installs packages, modifies PAM, configures audit rules,
+  # and dozens of other remediations. On a slow VM it can run for 30-45+ minutes.
+  # async/poll prevents the SSH connection from timing out mid-run.
+  async: 7200   # 2 hours ceiling
+  poll: 30      # check every 30 seconds
+  tags: [os_hardening, remediate]
+
+- name: Write remediation sentinel file
+  ansible.builtin.copy:
+    content: |
+      OS STIG remediation applied via Ansible os_hardening role.
+      SSG version: {{ os_stig_ssg_version }}
+      Profile: {{ os_stig_profile }}
+      Date: {{ ansible_date_time.iso8601 | default('unknown') }}
+    dest: "{{ os_stig_sentinel_file }}"
+    owner: root
+    group: root
+    mode: "0444"
+  when: not _sentinel.stat.exists
+  tags: [os_hardening, remediate]
+
+- name: Clean up fix script from /tmp
+  ansible.builtin.file:
+    path: /tmp/os_stig_fix.sh
+    state: absent
+  when: not _sentinel.stat.exists
+  tags: [os_hardening, remediate]
+
+- name: Remediation skipped — sentinel present
+  ansible.builtin.debug:
+    msg: >
+      Sentinel file {{ os_stig_sentinel_file }} exists.
+      OS STIG remediation was already applied on a previous run. Skipping.
+  when: _sentinel.stat.exists
+  tags: [os_hardening, remediate]

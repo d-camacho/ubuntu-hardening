@@ -1,0 +1,30 @@
+---
+# ============================================================
+# os_hardening role defaults
+# STIG: Ubuntu 24.04 STIG V1R1 via SCAP Security Guide
+# ============================================================
+
+# --- SSG source ---
+# Ubuntu 24.04 STIG V1R1 (official) — must be downloaded from ComplianceAsCode GitHub.
+# The apt package (ssg-debderived) does not include Ubuntu 24.04.
+os_stig_ssg_version: "0.1.80"
+os_stig_profile: "xccdf_org.ssgproject.content_profile_stig"
+
+# --- Paths ---
+os_stig_install_dir:  "/opt/scap"          # SSG zip is extracted here
+os_stig_results_dir:  "/var/log/oscap"     # scan HTML/XML reports land here
+
+# Derived paths — override os_stig_ssg_version above; do not set these directly
+os_stig_ssg_dir:  "{{ os_stig_install_dir }}/scap-security-guide-{{ os_stig_ssg_version }}"
+os_stig_ds_file:  "{{ os_stig_ssg_dir }}/ssg-ubuntu2404-ds.xml"
+os_stig_zip_dest: "{{ os_stig_install_dir }}/scap-security-guide-{{ os_stig_ssg_version }}.zip"
+
+# --- Sentinel file ---
+# Written to the host after remediation completes. Its presence prevents
+# re-running remediation + reboot on subsequent playbook runs.
+os_stig_sentinel_file: "/etc/os_stig_remediated"
+
+# --- Scan control ---
+# Set to false to skip the pre-remediation scan in fast CI/build runs.
+# The scan is read-only and does not affect the host; it exists for recordkeeping.
+os_stig_run_prescan: true

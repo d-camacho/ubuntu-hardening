@@ -1,0 +1,6 @@
+---
+# External Ansible collections used by this repo.
+# Ansible Core builtin modules do not need to be listed here.
+collections:
+  - name: community.general
+  - name: ansible.posix

@@ -1,0 +1,38 @@
+---
+# ============================================================
+# reboot.yml — Fire-and-forget reboot after STIG remediation
+#
+# ansible.builtin.reboot is intentionally NOT used here.
+# After OS STIG hardening, the DoD/USG interactive logon consent
+# banner is enabled. Ansible cannot answer the interactive "I Acknowledge"
+# prompt and would hang indefinitely waiting to reconnect.
+#
+# Instead: schedule a reboot 1 minute out, pause briefly so the
+# shutdown is registered, then let the play end cleanly.
+# The pipeline marks the run complete. Post-reboot validation
+# and Body of Evidence (BOE) reporting is performed manually
+# using DISA SCC.
+# ============================================================
+
+- name: Initiate reboot to apply OS STIG remediation (fire-and-forget)
+  ansible.builtin.command: /sbin/shutdown -r +1
+  async: 1
+  poll: 0
+  ignore_errors: true
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, reboot]
+
+- name: Pause to allow shutdown to be scheduled
+  ansible.builtin.pause:
+    seconds: 5
+    prompt: "Reboot scheduled. System will restart in ~1 minute. Play ending now."
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, reboot]
+
+- name: Reboot skipped — remediation did not run on this pass
+  ansible.builtin.debug:
+    msg: >
+      No remediation was applied this run (sentinel already existed).
+      Reboot not required.
+  when: not (_remediation_ran is defined and _remediation_ran.changed | default(false))
+  tags: [os_hardening, reboot]

@@ -1,0 +1,130 @@
+---
+# ============================================================
+# bootstrap.yml — Deploy SSH public key to a fresh VM
+#
+# Automatically detects or generates an SSH keypair on the
+# control node, then deploys it to each target host.
+# Run ONCE per new host before any other playbook.
+#
+# Key selection priority (control node):
+#   1. ~/.ssh/id_ed25519  (preferred)
+#   2. ~/.ssh/id_rsa      (fallback)
+#   3. Generate a new ed25519 keypair if neither exists
+#
+# Prerequisites on the control node:
+#   sshpass must be installed and available in PATH.
+#   Example installs:
+#     Ubuntu/Debian: sudo apt install sshpass
+#     macOS (Homebrew): brew install hudochenkov/sshpass/sshpass
+#
+# Usage:
+#   ansible-playbook bootstrap.yml --ask-pass
+#                                   ^^^^^^^^^^
+#   --ask-pass is REQUIRED. Without it Ansible has no password to supply
+#   and will fail with "Permission denied (publickey,password)".
+#
+# Requires: ansible.posix collection
+#   ansible-galaxy collection install ansible.posix
+# ============================================================
+
+# ---- Play 1: Prepare keypair on the control node ----------
+- name: Prepare SSH keypair on control node
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+    - name: Check sshpass is installed on control node
+      ansible.builtin.command:
+        cmd: which sshpass
+      register: _sshpass_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if sshpass is not installed
+      ansible.builtin.fail:
+        msg: |
+          sshpass is not installed on this control node.
+          Install it first, then re-run with --ask-pass:
+
+            Ubuntu/Debian: sudo apt install sshpass
+            macOS (Homebrew): brew install hudochenkov/sshpass/sshpass
+            ansible-playbook bootstrap.yml --ask-pass
+      when: _sshpass_check.rc != 0
+
+    - name: Check for existing ed25519 public key
+      ansible.builtin.stat:
+        path: "~/.ssh/id_ed25519.pub"
+      register: _ed25519_pub
+
+    - name: Check for existing RSA public key
+      ansible.builtin.stat:
+        path: "~/.ssh/id_rsa.pub"
+      register: _rsa_pub
+
+    - name: Generate ed25519 keypair (no existing key found)
+      ansible.builtin.command:
+        cmd: "ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' -C 'ansible'"
+        creates: "~/.ssh/id_ed25519"
+      when: not _ed25519_pub.stat.exists and not _rsa_pub.stat.exists
+
+    - name: Refresh ed25519 key check
+      ansible.builtin.stat:
+        path: "~/.ssh/id_ed25519.pub"
+      register: _ed25519_pub
+
+    - name: Fail if no usable public key found or generated
+      ansible.builtin.fail:
+        msg: "No SSH public key found and generation failed. Check ~/.ssh/ permissions."
+      when: not _ed25519_pub.stat.exists and not _rsa_pub.stat.exists
+
+    - name: Set SSH public key path
+      ansible.builtin.set_fact:
+        ssh_pubkey_path: >-
+          {{ _ed25519_pub.stat.path if _ed25519_pub.stat.exists else _rsa_pub.stat.path }}
+
+    - name: Display key that will be deployed
+      ansible.builtin.debug:
+        msg: "Control node public key: {{ ssh_pubkey_path }}"
+
+
+# ---- Play 2: Deploy key to target hosts -------------------
+- name: Deploy SSH key to target hosts
+  hosts: all
+  gather_facts: false
+
+  vars:
+    ansible_ssh_common_args: >-
+      -o PreferredAuthentications=keyboard-interactive,password,publickey
+      -o StrictHostKeyChecking=no
+
+  tasks:
+    - name: Ensure .ssh directory exists on target
+      ansible.builtin.file:
+        path: "~/.ssh"
+        state: directory
+        mode: "0700"
+      become: false
+
+    - name: Deploy SSH public key
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ lookup('file', hostvars['localhost'].ssh_pubkey_path) }}"
+        state: present
+      become: true
+
+    - name: Verify key-based authentication works
+      ansible.builtin.raw: echo key-auth-ok
+      vars:
+        ansible_ssh_common_args: "-o PreferredAuthentications=publickey"
+      register: _key_test
+      changed_when: false
+      failed_when: _key_test.rc != 0
+
+    - name: Bootstrap complete
+      ansible.builtin.debug:
+        msg:
+          - "SSH public key deployed to {{ inventory_hostname }}"
+          - "Key: {{ hostvars['localhost'].ssh_pubkey_path }}"
+          - "Key-based authentication confirmed"
+          - "You can now run: ansible-playbook os_hardening_main.yml"

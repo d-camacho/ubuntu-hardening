@@ -1,0 +1,71 @@
+---
+# ============================================================
+# install.yml — Install OpenSCAP scanner and SCAP Security Guide
+# ============================================================
+
+- name: Install openscap-scanner and unzip
+  ansible.builtin.apt:
+    name:
+      - openscap-scanner
+      - unzip
+    state: present
+    update_cache: true
+  tags: [os_hardening, packages]
+
+- name: Create SCAP install directory
+  ansible.builtin.file:
+    path: "{{ os_stig_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [os_hardening, packages]
+
+- name: Check if SSG is already extracted
+  ansible.builtin.stat:
+    path: "{{ os_stig_ssg_dir }}"
+  register: _ssg_dir
+  tags: [os_hardening, packages]
+
+# Ubuntu 24.04 STIG is draft — apt package (ssg-debderived) does not include it.
+# Download from ComplianceAsCode GitHub releases.
+- name: Download SCAP Security Guide {{ os_stig_ssg_version }}
+  ansible.builtin.get_url:
+    url: "https://github.com/ComplianceAsCode/content/releases/download/v{{ os_stig_ssg_version }}/scap-security-guide-{{ os_stig_ssg_version }}.zip"
+    dest: "{{ os_stig_zip_dest }}"
+    mode: "0644"
+  when: not _ssg_dir.stat.exists
+  tags: [os_hardening, packages]
+
+- name: Extract SCAP Security Guide
+  ansible.builtin.unarchive:
+    src: "{{ os_stig_zip_dest }}"
+    dest: "{{ os_stig_install_dir }}"
+    remote_src: true
+    creates: "{{ os_stig_ssg_dir }}"
+  when: not _ssg_dir.stat.exists
+  tags: [os_hardening, packages]
+
+- name: Verify Ubuntu 24.04 datastream file is present
+  ansible.builtin.stat:
+    path: "{{ os_stig_ds_file }}"
+  register: _ds_file
+  tags: [os_hardening, packages]
+
+- name: Fail if Ubuntu 24.04 datastream is missing
+  ansible.builtin.fail:
+    msg: >
+      Ubuntu 24.04 STIG datastream not found at {{ os_stig_ds_file }}.
+      Check os_stig_ssg_version (current: {{ os_stig_ssg_version }}) and that the
+      downloaded SSG includes ssg-ubuntu2404-ds.xml.
+  when: not _ds_file.stat.exists
+  tags: [os_hardening, packages]
+
+- name: Create OSCAP results directory
+  ansible.builtin.file:
+    path: "{{ os_stig_results_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [os_hardening, packages]

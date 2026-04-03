@@ -1,0 +1,158 @@
+---
+# ============================================================
+# post_remediate.yml — Cleanup after OpenSCAP STIG fix script
+#
+# OpenSCAP's bash fix script runs for 30-45 minutes, installs
+# packages, modifies PAM/configs, and can clobber settings that
+# pre_openscap.yml put in place. These tasks re-apply anything
+# OpenSCAP may have overwritten before the system reboots.
+#
+# Gated by the same sentinel as remediate.yml — only runs after
+# a fresh remediation pass, not on subsequent idempotent runs.
+# ============================================================
+
+# ─────────────────────────────────────────────────────────────
+# V-270831 — AIDE integrity of audit tools
+# OpenSCAP may reinstall aide-common (resetting /etc/aide/aide.conf
+# to the package default) or run aideinit which rebuilds the DB.
+# Re-deploying the entries ensures the scanner finds them.
+# ─────────────────────────────────────────────────────────────
+- name: "V-270831 | Re-deploy AIDE audit tool integrity entries after OpenSCAP"
+  ansible.builtin.blockinfile:
+    path: /etc/aide/aide.conf
+    marker: "# {mark} STIG V-270831 AIDE AUDIT TOOLS"
+    block: |
+      # STIG V-270831 — Audit tool integrity checks
+      # Scanner: egrep '(\/sbin\/(audit|au))' /etc/aide/aide.conf
+      /sbin/auditctl p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/auditd p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/ausearch p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512
+    create: false
+  ignore_errors: true
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+# ─────────────────────────────────────────────────────────────
+# V-270667/668/669 — Remove duplicate SSH crypto from OpenSCAP drop-in
+#
+# The SCC OVAL check for Ciphers/MACs/KexAlgorithms uses:
+#   Check Existence: One and only one collected item may exist.
+# Our pre_openscap.yml writes these to /etc/ssh/sshd_config.
+# OpenSCAP also writes them to sshd_config.d/00-complianceascode-hardening.conf.
+# Two matching items causes the one_exists check to fail even when both
+# have the correct value. Strip the directives from the drop-in so only
+# the main sshd_config entry is seen by the scanner.
+# ─────────────────────────────────────────────────────────────
+- name: "V-270667 | Remove duplicate Ciphers from OpenSCAP sshd drop-in"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config.d/00-complianceascode-hardening.conf
+    regexp: '^\s*Ciphers\s'
+    state: absent
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+- name: "V-270668 | Remove duplicate MACs from OpenSCAP sshd drop-in"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config.d/00-complianceascode-hardening.conf
+    regexp: '^\s*MACs\s'
+    state: absent
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+- name: "V-270669 | Remove duplicate KexAlgorithms from OpenSCAP sshd drop-in"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config.d/00-complianceascode-hardening.conf
+    regexp: '^\s*KexAlgorithms\s'
+    state: absent
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+# ─────────────────────────────────────────────────────────────
+# V-270668 — Ensure sshd MACs in main sshd_config
+# Re-apply after OpenSCAP in case it overwrote the main config.
+# ─────────────────────────────────────────────────────────────
+- name: "V-270668 | Ensure sshd MACs in main sshd_config (post-OpenSCAP dedup)"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^[#\s]*MACs\s'
+    line: "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    state: present
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+- name: "V-270670 | Ensure SSH client Ciphers in main ssh_config (post-OpenSCAP dedup)"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/ssh_config
+    regexp: '^[#\s]*Ciphers\s'
+    line: "Ciphers aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes128-ctr"
+    state: present
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+- name: "V-270671 | Ensure SSH client MACs in main ssh_config (post-OpenSCAP dedup)"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/ssh_config
+    regexp: '^[#\s]*MACs\s'
+    line: "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,hmac-sha2-256"
+    state: present
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+# ─────────────────────────────────────────────────────────────
+# V-270756 — Log file permissions
+# OpenSCAP installs packages → new 0644 log files. Re-run chmod.
+# Also strip sgid from files where it doesn't belong:
+#   - /var/log/journal files (inherit sgid from SGID directory)
+#   - /var/log/aide files/directory
+# NOTE: Directories failing uexec=1 are OVAL false positives —
+# the check text uses -type f but the OVAL does not. Directories
+# require execute bits and cannot be fixed without breaking access.
+# ─────────────────────────────────────────────────────────────
+- name: "V-270756 | Re-set /var/log file permissions to 0640 after OpenSCAP"
+  ansible.builtin.command:
+    cmd: >
+      find /var/log -perm /137
+      ! -name '*[bw]tmp' ! -name '*lastlog'
+      ! -name '*history' ! -name 'eipp.log.xz'
+      -type f -exec chmod 0640 '{}' \;
+  changed_when: true
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+- name: "V-270756 | Strip sgid from journal files (sgid inherited from SGID directory)"
+  ansible.builtin.command:
+    cmd: find /var/log/journal -type f -perm /2000 -exec chmod g-s {} \;
+  changed_when: true
+  ignore_errors: true
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+- name: "V-270756 | Strip sgid from /var/log/aide directory"
+  ansible.builtin.command:
+    cmd: chmod g-s /var/log/aide
+  changed_when: true
+  ignore_errors: true
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+# ─────────────────────────────────────────────────────────────
+# V-270757 — Journal directory permissions
+# OpenSCAP restarts systemd-journald; journal dirs may be
+# recreated with wrong permissions. Re-apply tmpfiles.d.
+# ─────────────────────────────────────────────────────────────
+- name: "V-270757 | Re-apply journal directory permissions after OpenSCAP"
+  ansible.builtin.command:
+    cmd: systemd-tmpfiles --create /etc/tmpfiles.d/99-stig-journal.conf
+  changed_when: true
+  ignore_errors: true
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]
+
+- name: "Post-remediate | Notify SSH restart"
+  ansible.builtin.debug:
+    msg: "Post-OpenSCAP cleanup complete. SSH will restart on next handler flush."
+  when: _remediation_ran is defined and _remediation_ran.changed | default(false)
+  tags: [os_hardening, post_remediate]

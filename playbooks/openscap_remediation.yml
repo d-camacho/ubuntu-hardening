@@ -1,0 +1,53 @@
+---
+# ============================================================
+# harden_os.yml — Ubuntu 24.04 OS STIG Hardening (standalone)
+#
+# Runs the os_hardening role as a standalone OS hardening workflow.
+# Safe to run alone when only OS-level changes are needed.
+#
+# IMPORTANT — re-run behaviour on already-hardened hosts:
+#   After OS STIG remediation + reboot, the DoD/USG interactive logon
+#   consent banner blocks Ansible from reconnecting via SSH (sudo/PTY
+#   triggers the interactive "I Acknowledge" prompt). The pre_tasks
+#   block below handles this gracefully:
+#     - Uses a raw, no-sudo connection test (avoids PTY/banner trigger)
+#     - Short ansible_connect_timeout prevents pipeline hangs
+#     - ignore_unreachable: true ensures an unreachable host is skipped,
+#       not treated as a fatal error
+# ============================================================
+
+- name: Ubuntu 24.04 OS STIG Hardening
+  hosts: all
+  become: yes
+  gather_facts: no
+  ignore_unreachable: true
+  vars:
+    ansible_connect_timeout: 10   # seconds; prevents hanging on banner-blocked hosts
+
+  pre_tasks:
+    # Use raw (no Python, no sudo, no PTY) to check sentinel before become is attempted.
+    # become + PTY would trigger the interactive DoD banner on an already-hardened host.
+    - name: Test connection and check OS hardening sentinel (no sudo)
+      ansible.builtin.raw: test -f /etc/os_stig_remediated && echo HARDENED || echo FRESH
+      become: false
+      register: _os_state
+      changed_when: false
+      failed_when: false
+      tags: always
+
+    - name: Skip play — OS already hardened or host unreachable
+      ansible.builtin.meta: end_play
+      when: >
+        _os_state is not defined
+        or _os_state.rc | default(1) != 0
+        or 'HARDENED' in (_os_state.stdout | default(''))
+      tags: always
+
+    # gather_facts was disabled to avoid triggering become before the sentinel check.
+    # Run it now that we know the host is reachable and un-hardened.
+    - name: Gather facts
+      ansible.builtin.gather_facts:
+      tags: always
+
+  roles:
+    - os_hardening
