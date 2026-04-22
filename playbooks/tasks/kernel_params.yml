@@ -1,0 +1,177 @@
+---
+# ============================================================
+# kernel_params.yml — SECTION 4: Kernel & System Parameters
+# ============================================================
+
+# UBTU-24-700310 - ASLR
+- name: "UBTU-24-700310 | Enable Address Space Layout Randomization (ASLR)"
+  ansible.posix.sysctl:
+    name: kernel.randomize_va_space
+    value: '2'
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-stig.conf
+
+# UBTU-24-600190 - TCP syncookies
+- name: "UBTU-24-600190 | Enable TCP syncookies"
+  ansible.posix.sysctl:
+    name: net.ipv4.tcp_syncookies
+    value: '1'
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-stig.conf
+
+# UBTU-24-600070 - Disable kernel core dumps
+- name: "UBTU-24-600070 | Disable kernel core dumps via sysctl"
+  ansible.posix.sysctl:
+    name: kernel.core_pattern
+    value: '|/bin/false'
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-stig.conf
+
+- name: "UBTU-24-600070 | Disable core dumps in limits.conf"
+  ansible.builtin.lineinfile:
+    path: /etc/security/limits.conf
+    regexp: '^\*\s+hard\s+core'
+    line: "* hard core 0"
+    state: present
+
+# UBTU-24-600140 - Restrict kernel message buffer
+- name: "UBTU-24-600140 | Restrict access to kernel message buffer"
+  ansible.posix.sysctl:
+    name: kernel.dmesg_restrict
+    value: '1'
+    state: present
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-stig.conf
+
+# UBTU-24-300026 - Disable Ctrl-Alt-Delete
+- name: "UBTU-24-300026 | Mask ctrl-alt-del.target"
+  ansible.builtin.systemd:
+    name: ctrl-alt-del.target
+    masked: true
+
+- name: "UBTU-24-300026 | Reload systemd daemon"
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# UBTU-24-102000 - Set root password. The hash is placed in /etc/shadow so
+# a known credential exists before the account is locked below (V-270724).
+# Locking is deferred until after the GRUB bootloader password is configured
+# so that if GRUB setup fails, root is not left locked without a recovery path.
+- name: "DEBUG | Show root_recovery_password length"
+  ansible.builtin.debug:
+    msg: "root_recovery_password length: {{ root_recovery_password | length }}"
+
+- name: "UBTU-24-102000 | Set root password"
+  ansible.builtin.user:
+    name: root
+    password: "{{ root_recovery_password | password_hash('sha512') }}"
+  no_log: true
+
+# UBTU-24-700320 / V-270773 - APT auto-remove old packages and kernels.
+# Scanner checks 50unattended-upgrades for BOTH Remove-Unused-Dependencies
+# AND Remove-Unused-Kernel-Packages.
+- name: "UBTU-24-700320/V-270773 | Configure APT to auto-remove unused packages"
+  ansible.builtin.lineinfile:
+    path: /etc/apt/apt.conf.d/50unattended-upgrades
+    regexp: 'Unattended-Upgrade::Remove-Unused-Dependencies'
+    line: 'Unattended-Upgrade::Remove-Unused-Dependencies "true";'
+    state: present
+    create: true
+
+- name: "UBTU-24-700320/V-270773 | Configure APT to auto-remove unused kernel packages"
+  ansible.builtin.lineinfile:
+    path: /etc/apt/apt.conf.d/50unattended-upgrades
+    regexp: 'Unattended-Upgrade::Remove-Unused-Kernel-Packages'
+    line: 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";'
+    state: present
+
+# UBTU-24-300001 - APT signed packages only
+- name: "UBTU-24-300001 | Ensure APT requires signed packages"
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/99-stig-signed
+    content: |
+      APT::Get::AllowUnauthenticated "false";
+      Acquire::AllowInsecureRepositories "false";
+      Acquire::AllowDowngradeToInsecureRepositories "false";
+    mode: '0644'
+
+# UBTU-24-300039 / V-270718 - Disable USB mass storage
+# Scanner checks /etc/modprobe.d/DISASTIG.conf specifically for this exact filename.
+- name: "UBTU-24-300039/V-270718 | Disable USB mass storage in DISASTIG.conf"
+  ansible.builtin.blockinfile:
+    path: /etc/modprobe.d/DISASTIG.conf
+    marker: "# {mark} STIG V-270718 USB STORAGE"
+    block: |
+      install usb-storage /bin/false
+      blacklist usb-storage
+    create: true
+    mode: '0644'
+
+# UBTU-24-102010 / V-270676 - Initiate session audits at startup (audit=1 in GRUB)
+# Both GRUB_CMDLINE_LINUX and GRUB_CMDLINE_LINUX_DEFAULT must contain audit=1.
+# The negative lookahead makes each task idempotent.
+- name: "UBTU-24-102010 | Add audit=1 to GRUB_CMDLINE_LINUX"
+  ansible.builtin.replace:
+    path: /etc/default/grub
+    regexp: '^(GRUB_CMDLINE_LINUX=(?!.*audit=).*)"$'
+    replace: '\1 audit=1"'
+    backup: true
+
+- name: "UBTU-24-102010 | Add audit=1 to GRUB_CMDLINE_LINUX_DEFAULT (V-270676)"
+  ansible.builtin.replace:
+    path: /etc/default/grub
+    regexp: '^(GRUB_CMDLINE_LINUX_DEFAULT=(?!.*audit=).*)"$'
+    replace: '\1 audit=1"'
+
+- name: "UBTU-24-102010 | Update GRUB"
+  ansible.builtin.command:
+    cmd: update-grub
+  changed_when: true
+
+# V-270675 - Single-user and maintenance mode must require authentication.
+# The scanner checks /boot/grub/grub.cfg for password_pbkdf2. This is the GRUB
+# bootloader password — distinct from the Linux root account password set above.
+# The PBKDF2 hash is generated from root_recovery_password each run (random salt
+# is acceptable; the password remains the same, only the stored hash differs).
+- name: "V-270675 | Generate GRUB PBKDF2 password hash"
+  ansible.builtin.shell:
+    cmd: >
+      printf '%s\n%s\n' '{{ root_recovery_password }}' '{{ root_recovery_password }}'
+      | grub-mkpasswd-pbkdf2
+      | awk '/pbkdf2/{print $NF}'
+  register: grub_pbkdf2_hash
+  no_log: false
+  changed_when: false
+
+- name: "V-270675 | Install GRUB bootloader password in /etc/grub.d/40_custom"
+  ansible.builtin.blockinfile:
+    path: /etc/grub.d/40_custom
+    marker: "# {mark} STIG V-270675 GRUB BOOTLOADER PASSWORD"
+    block: |
+      set superusers="root"
+      password_pbkdf2 root {{ grub_pbkdf2_hash.stdout }}
+    create: false
+
+- name: "V-270675 | Mark normal boot entries unrestricted (password required only to edit, not to boot)"
+  ansible.builtin.replace:
+    path: /etc/grub.d/10_linux
+    regexp: '^(CLASS="(?!.*--unrestricted).*)"$'
+    replace: '\1 --unrestricted"'
+
+- name: "V-270675 | Rebuild GRUB config to embed bootloader password"
+  ansible.builtin.command:
+    cmd: update-grub
+  changed_when: true
+
+# V-270724 - Prevent direct login to the root account.
+# Done HERE (after GRUB password is confirmed written) so that if update-grub
+# fails above, this task never runs and root remains unlocked for recovery.
+# PermitRootLogin no (SSH drop-in) blocks SSH. GRUB bootloader password
+# (V-270675) protects single-user mode. Together these satisfy V-270724.
+- name: "V-270724 | Lock root account to prevent direct login"
+  ansible.builtin.command:
+    cmd: passwd -l root
+  changed_when: true

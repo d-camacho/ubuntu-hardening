@@ -1,0 +1,176 @@
+---
+# =============================================================================
+# ubuntu_pro_remediation.yml — Ubuntu 24.04 STIG hardening via Ubuntu Pro USG
+# =============================================================================
+# Purpose   : Apply DISA STIG remediation using Canonical's Ubuntu Security
+#             Guide (USG), included with an Ubuntu Pro subscription.
+# Pipeline  : Runs AFTER pre_openscap.yml (Stage 2B alternative to openscap_remediation.yml).
+# Requires  : Active Ubuntu Pro subscription; token in vault as vault_ubuntu_pro_token.
+#
+# USG advantages over OpenSCAP:
+#   - Native Ubuntu 24.04 STIG profile maintained by Canonical
+#   - Supports FIPS 140-3 kernel mode enablement (UBTU-24-600030 / V-270744)
+#   - Tighter integration with apt and cloud images
+#
+# Skipped controls (same as pre_openscap.yml):
+#   - PIV/smart card (requires hardware token — configure at deploy time)
+#   - SSSD PKI identity mapping (V-270736) — configure at deploy time with real LDAP/AD
+#
+# NOTE: ansible.builtin.reboot is NOT used. The DoD/USG interactive consent banner
+# enabled by STIG hardening prevents Ansible from reconnecting post-reboot.
+# Post-reboot validation is performed manually with DISA SCC.
+# =============================================================================
+
+- name: Ubuntu 24.04 STIG Hardening via Ubuntu Pro USG
+  hosts: all
+  become: true
+  gather_facts: false
+  ignore_unreachable: true
+
+  vars:
+    ansible_connect_timeout: 10          # seconds; prevents hanging on banner-blocked hosts
+    os_stig_sentinel_file: "/etc/os_stig_remediated"
+    ubuntu_pro_token: "{{ vault_ubuntu_pro_token | default('') }}"
+
+  vars_files:
+    - ../inventories/group_vars/all/vault.yml
+
+  pre_tasks:
+    # Use raw (no Python, no sudo, no PTY) to check sentinel before become is attempted.
+    # become + PTY would trigger the interactive DoD banner on an already-hardened host.
+    - name: Test connection and check OS hardening sentinel (no sudo)
+      ansible.builtin.raw: test -f /etc/os_stig_remediated && echo HARDENED || echo FRESH
+      become: false
+      register: _os_state
+      changed_when: false
+      failed_when: false
+      tags: always
+
+    - name: Skip play — OS already hardened or host unreachable
+      ansible.builtin.meta: end_play
+      when: >
+        _os_state is not defined
+        or _os_state.rc | default(1) != 0
+        or 'HARDENED' in (_os_state.stdout | default(''))
+      tags: always
+
+    # gather_facts was disabled to avoid triggering become before the sentinel check.
+    # Run it now that we know the host is reachable and un-hardened.
+    - name: Gather facts
+      ansible.builtin.gather_facts:
+      tags: always
+
+    - name: Assert Ubuntu Pro token is set
+      ansible.builtin.assert:
+        that: ubuntu_pro_token | length > 0
+        fail_msg: >
+          vault_ubuntu_pro_token is not set. Set it in
+          inventories/group_vars/all/vault.yml and encrypt the file with
+          ansible-vault before running this playbook.
+      tags: always
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 1. Install ubuntu-advantage-tools
+    # -------------------------------------------------------------------------
+    - name: Install ubuntu-advantage-tools
+      ansible.builtin.apt:
+        name: ubuntu-advantage-tools
+        state: present
+        update_cache: true
+      tags: [pro, packages]
+
+    # -------------------------------------------------------------------------
+    # 2. Attach Ubuntu Pro subscription (idempotent — skipped if already attached)
+    # -------------------------------------------------------------------------
+    - name: Check Ubuntu Pro attachment status
+      ansible.builtin.command: pro status --format json
+      register: _pro_status_raw
+      changed_when: false
+      failed_when: false
+      tags: [pro]
+
+    - name: Parse Pro attachment status
+      ansible.builtin.set_fact:
+        _pro_attached: "{{ (_pro_status_raw.stdout | from_json).get('attached', false) }}"
+      when: _pro_status_raw.rc == 0 and _pro_status_raw.stdout | length > 0
+      tags: [pro]
+
+    - name: Attach Ubuntu Pro subscription
+      ansible.builtin.command: pro attach {{ ubuntu_pro_token }}
+      no_log: true    # suppress token from Ansible output and logs
+      when: not (_pro_attached | default(false))
+      register: _pro_attach
+      tags: [pro]
+
+    # -------------------------------------------------------------------------
+    # 3. Enable USG service and install usg package
+    # -------------------------------------------------------------------------
+    - name: Enable Ubuntu Security Guide (USG) via Pro
+      ansible.builtin.command: pro enable usg --assume-yes
+      register: _usg_enable
+      changed_when: "'already enabled' not in (_usg_enable.stdout | default(''))"
+      tags: [pro, usg]
+
+    - name: Install usg package
+      ansible.builtin.apt:
+        name: usg
+        state: present
+      tags: [pro, usg, packages]
+
+    # -------------------------------------------------------------------------
+    # 4. Apply USG STIG remediation
+    #
+    # usg fix stig applies Canonical's STIG remediation rules for Ubuntu 24.04.
+    # This can take 20-45 minutes on a slow VM. async/poll prevents SSH timeout.
+    #
+    # NOTE: Verify the profile name matches your installed USG version:
+    #   usg list-profiles   (lists available profiles)
+    # The canonical profile name for Ubuntu 24.04 STIG is "stig".
+    # -------------------------------------------------------------------------
+    - name: Apply USG STIG remediation
+      ansible.builtin.command: usg fix stig
+      register: _usg_remediation
+      async: 7200   # 2 hours ceiling
+      poll: 30      # check every 30 seconds
+      tags: [usg, remediate]
+
+    # -------------------------------------------------------------------------
+    # 5. Write sentinel file (only on clean rc == 0)
+    # -------------------------------------------------------------------------
+    - name: Write remediation sentinel file
+      ansible.builtin.copy:
+        content: |
+          OS STIG remediation applied via Ubuntu Pro USG.
+          Date: {{ ansible_date_time.iso8601 | default('unknown') }}
+        dest: "{{ os_stig_sentinel_file }}"
+        owner: root
+        group: root
+        mode: "0444"
+      when:
+        - _usg_remediation is defined
+        - _usg_remediation.rc | default(1) == 0
+      tags: [usg, remediate]
+
+    # -------------------------------------------------------------------------
+    # 6. Fire-and-forget reboot
+    #
+    # ansible.builtin.reboot is NOT used because the DoD consent banner enabled
+    # by STIG hardening triggers an interactive prompt that blocks Ansible
+    # reconnection. The shutdown command exits immediately; the play ends cleanly.
+    # -------------------------------------------------------------------------
+    - name: Schedule reboot (fire-and-forget — play ends here)
+      ansible.builtin.command: shutdown -r +1 "STIG hardening complete — rebooting"
+      async: 1
+      poll: 0
+      ignore_errors: true
+      tags: [reboot]
+
+    - name: Notify — reboot scheduled
+      ansible.builtin.debug:
+        msg: >
+          Reboot scheduled in 1 minute. Wait for the host to come back up, then
+          run manual DISA SCC validation per STIG Documents/scc_scanner.md.
+          Post-reboot Ansible re-entry is blocked by the DoD consent banner —
+          this is expected and intentional.
+      tags: [reboot]

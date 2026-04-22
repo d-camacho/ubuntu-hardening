@@ -1,0 +1,57 @@
+---
+# ============================================================
+# auditd_storage.yml — SECTION 9: Auditd Storage & Remote Logging
+# ============================================================
+
+# V-270816 - auditd must be configured to write log records to disk.
+# These settings ensure audit logs are retained and the system warns/acts
+# before running out of space.
+- name: "V-270816 | Configure auditd max_log_file"
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^[#\s]*max_log_file\s*='
+    line: "max_log_file = {{ auditd_max_log_file }}"
+    state: present
+
+- name: "V-270816 | Configure auditd num_logs"
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^[#\s]*num_logs\s*='
+    line: "num_logs = {{ auditd_num_logs }}"
+    state: present
+
+- name: "V-270816 | Configure auditd space_left"
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^[#\s]*space_left\s*='
+    line: "space_left = {{ auditd_space_left }}"
+    state: present
+
+- name: "V-270816 | Configure auditd space_left_action"
+  ansible.builtin.lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^[#\s]*space_left_action\s*='
+    line: "space_left_action = email"
+    state: present
+
+# V-270658 - Audit records must be shipped to a remote log server.
+# audispd-plugins provides the au-remote plugin (active = yes enables offloading).
+# Set vault_audispd_remote_server in Ansible Vault to the syslog collector FQDN/IP.
+- name: "V-270658 | Enable audisp-remote plugin"
+  ansible.builtin.lineinfile:
+    path: /etc/audit/plugins.d/au-remote.conf
+    regexp: '^[#\s]*active\s*='
+    line: "active = yes"
+    state: present
+    create: true
+    owner: root
+    group: root
+    mode: '0640'
+
+- name: "V-270658 | Configure audisp-remote log collector"
+  ansible.builtin.lineinfile:
+    path: /etc/audit/audisp-remote.conf
+    regexp: '^[#\s]*remote_server\s*='
+    line: "remote_server = {{ audispd_remote_server }}"
+    state: present
+  ignore_errors: true

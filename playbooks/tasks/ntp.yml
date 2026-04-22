@@ -1,0 +1,27 @@
+---
+# ============================================================
+# ntp.yml — SECTION 10: Chrony NTP
+# ============================================================
+
+# V-270751 - System must synchronize internal clock with an authoritative NTP server.
+# Scanner checks: grep -ir maxpoll /etc/chrony* must return ONLY "server ... maxpoll 16".
+# Ubuntu 24.04 defaults to 4 pool lines each with "maxpoll 12" — lineinfile only
+# replaces the first match, leaving the others to fail the check.
+# Fix: replace ALL pool/server lines with empty strings first, then add one server line.
+- name: "V-270751 | Remove all default pool/server lines from chrony.conf"
+  ansible.builtin.replace:
+    path: /etc/chrony/chrony.conf
+    regexp: '^(server|pool)\s.*$'
+    replace: ''
+
+- name: "V-270751 | Add single NTP server with maxpoll 16 to chrony.conf"
+  ansible.builtin.lineinfile:
+    path: /etc/chrony/chrony.conf
+    line: "server {{ ntp_server }} iburst maxpoll 16"
+    state: present
+
+- name: "V-270751 | Enable and start chrony"
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started

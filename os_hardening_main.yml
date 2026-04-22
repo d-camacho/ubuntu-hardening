@@ -1,11 +1,35 @@
 ---
-# ============================================================
-# os_hardening_main.yml playbook
-# Hardens Ubuntu 24.04 LTS Live Server in two phases
-# pre_openscap.yml addresses OpenSCAP shortcomings 
-# openscap_remediation.yml is a playbook wrapper for OpenSCAP automated remediation 
-# Running both playbooks should result in ~90% compliance
-# ============================================================
+# =============================================================================
+# os_hardening_main.yml — Ubuntu 24.04 STIG hardening entry point
+# =============================================================================
+#
+# CHOOSE ONE remediation engine — uncomment Stage 2A OR Stage 2B, not both.
+#
+# Stage 1 (pre_openscap.yml) is shared and always runs first regardless of engine.
+# It applies manual STIG controls and gap fixes that neither engine handles well.
+#
+# Stage 2A — OpenSCAP + SCAP Security Guide (DEFAULT)
+#   - No Ubuntu Pro subscription required
+#   - Uses oscap xccdf generate fix from ComplianceAsCode SSG
+#   - FIPS 140-3 kernel mode (V-270744) NOT supported without Ubuntu Pro
+#   - Target compliance: ~90% with pre_openscap.yml + openscap_remediation.yml
+#
+# Stage 2B — Ubuntu Pro USG
+#   - Requires Ubuntu Pro subscription (vault_ubuntu_pro_token must be set)
+#   - Uses Canonical's native Ubuntu Security Guide (usg fix stig)
+#   - FIPS 140-3 kernel mode supported (enable separately via: pro enable fips-updates)
+#   - Tighter integration with Ubuntu 24.04 apt and cloud images
+#
+# Running both at once is NOT supported and will produce undefined behaviour.
+# =============================================================================
 
+# --- Stage 1: Manual pre-hardening (required; shared by both engines) ---
 - import_playbook: playbooks/pre_openscap.yml
+
+# --- Stage 2A: OpenSCAP remediation (DEFAULT — no Ubuntu Pro required) ---
 - import_playbook: playbooks/openscap_remediation.yml
+
+# --- Stage 2B: Ubuntu Pro USG remediation ---
+# Requires vault_ubuntu_pro_token set in inventories/group_vars/all/vault.yml.
+# Comment out Stage 2A above and uncomment the line below to switch engines.
+# - import_playbook: playbooks/ubuntu_pro_remediation.yml

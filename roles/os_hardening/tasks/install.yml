@@ -29,11 +29,13 @@
 
 # Ubuntu 24.04 STIG is draft — apt package (ssg-debderived) does not include it.
 # Download from ComplianceAsCode GitHub releases.
+# Set os_stig_ssg_checksum in defaults/main.yml to verify download integrity.
 - name: Download SCAP Security Guide {{ os_stig_ssg_version }}
   ansible.builtin.get_url:
     url: "https://github.com/ComplianceAsCode/content/releases/download/v{{ os_stig_ssg_version }}/scap-security-guide-{{ os_stig_ssg_version }}.zip"
     dest: "{{ os_stig_zip_dest }}"
     mode: "0644"
+    checksum: "{{ os_stig_ssg_checksum | default(omit) }}"
   when: not _ssg_dir.stat.exists
   tags: [os_hardening, packages]
 

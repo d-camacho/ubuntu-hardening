@@ -1,0 +1,56 @@
+---
+# ============================================================
+# rsyslog.yml — SECTION 7: rsyslog Configuration
+# ============================================================
+
+# UBTU-24-100200 - Preserve log records from failure events
+- name: "UBTU-24-100200 | Install rsyslog"
+  ansible.builtin.apt:
+    name: rsyslog
+    state: present
+
+- name: "UBTU-24-100200 | Enable and start rsyslog"
+  ansible.builtin.systemd:
+    name: rsyslog
+    enabled: true
+    state: started
+
+# UBTU-24-700130/700140/700150 - /var/log/syslog permissions
+# Placed here (after rsyslog install/start) because /var/log/syslog does not
+# exist until rsyslog runs for the first time. Running this in Section 5
+# (before rsyslog is installed) guarantees the file is absent and the task fails.
+- name: "UBTU-24-700130/140/150 | Set /var/log/syslog ownership and permissions"
+  ansible.builtin.file:
+    path: /var/log/syslog
+    owner: syslog
+    group: adm
+    mode: '0640'
+  ignore_errors: true
+
+# V-270681 - Monitor authentication events via rsyslog.
+# OVAL checks for auth.* and authpriv.* as SEPARATE patterns — combined
+# "auth,authpriv.*" does not satisfy either OVAL check. Must use individual lines.
+- name: "V-270681 | Add auth and daemon log directives to 50-default.conf"
+  ansible.builtin.blockinfile:
+    path: /etc/rsyslog.d/50-default.conf
+    marker: "# {mark} STIG V-270681 AUTH MONITORING"
+    block: |
+      # STIG V-270681 — Monitor remote access / authentication events
+      auth.*             /var/log/auth.log
+      authpriv.*         /var/log/auth.log
+      daemon.*           /var/log/daemon.log
+    create: true
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart rsyslog
+
+# V-270756 — Set rsyslog FileCreateMode so log files created by rsyslog are 0640.
+# This ensures new log files written during OpenSCAP's 30-45 min run start at 0640.
+- name: "V-270756 | Set rsyslog FileCreateMode to 0640"
+  ansible.builtin.lineinfile:
+    path: /etc/rsyslog.conf
+    regexp: '^\$FileCreateMode'
+    line: '$FileCreateMode 0640'
+    state: present
+  notify: restart rsyslog

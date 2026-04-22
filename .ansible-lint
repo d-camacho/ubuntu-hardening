@@ -1,0 +1,33 @@
+# .ansible-lint — ansible-lint configuration for ubuntu-hardening
+# Run: ansible-lint
+# Install: pip install ansible-lint
+
+profile: production
+
+# Exclude paths that are not Ansible content
+exclude_paths:
+  - .git/
+  - hooks/
+  - STIG Documents/
+  - .github/
+
+# Skip rules that conflict with STIG-required patterns
+skip_list:
+  # STIG tasks intentionally use changed_when: true on commands that always change state
+  # (e.g., augenrules --load, passwd -l root, update-grub) — this is correct behavior.
+  - no-changed-when
+  # STIG tasks use shell: for oscap and grub-mkpasswd-pbkdf2 where command: won't work
+  - command-instead-of-shell
+  # STIG-required package names don't need version pinning
+  - package-latest
+
+# Warn (don't fail) on these
+warn_list:
+  - experimental
+  - yaml[line-length]
+
+# Require FQCN for all module calls (enforces ansible.builtin.* style)
+use_default_rules: true
+
+# Minimum ansible-lint version
+min_ansible_version: "2.14"

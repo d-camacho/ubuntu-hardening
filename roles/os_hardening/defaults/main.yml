@@ -9,6 +9,11 @@
 # The apt package (ssg-debderived) does not include Ubuntu 24.04.
 os_stig_ssg_version: "0.1.80"
 os_stig_profile: "xccdf_org.ssgproject.content_profile_stig"
+# SHA256 checksum for the SSG zip download. Set to "sha256:<hex>" to verify integrity.
+# Find the checksum on the ComplianceAsCode GitHub releases page next to the zip asset.
+# Example: os_stig_ssg_checksum: "sha256:abc123..."
+# Leave empty to skip checksum verification (not recommended for production).
+os_stig_ssg_checksum: ""
 
 # --- Paths ---
 os_stig_install_dir:  "/opt/scap"          # SSG zip is extracted here

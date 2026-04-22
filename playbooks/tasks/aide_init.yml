@@ -1,0 +1,30 @@
+---
+# ============================================================
+# aide_init.yml — SECTION 13: AIDE Initialization
+# ============================================================
+
+# UBTU-24-100100/100130 - Initialize AIDE database
+- name: "UBTU-24-100100 | Check if AIDE database exists"
+  ansible.builtin.stat:
+    path: /var/lib/aide/aide.db
+  register: aide_db
+
+- name: "UBTU-24-100100 | Initialize AIDE database (this may take several minutes)"
+  ansible.builtin.command:
+    cmd: aideinit -y -f
+  changed_when: true
+  when: not aide_db.stat.exists
+  async: 600
+  poll: 30
+  ignore_errors: true
+
+- name: "UBTU-24-100130 | Configure AIDE daily cron check"
+  ansible.builtin.copy:
+    dest: /etc/cron.daily/aide-check
+    content: |
+      #!/bin/bash
+      # STIG UBTU-24-100130 - Daily AIDE integrity check
+      /usr/bin/aide --check 2>&1 | /usr/bin/logger -t aide
+    mode: '0755'
+    owner: root
+    group: root

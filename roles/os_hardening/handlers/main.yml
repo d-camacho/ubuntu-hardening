@@ -1,0 +1,14 @@
+---
+# ============================================================
+# os_hardening role handlers
+# ============================================================
+
+- name: restart ssh
+  ansible.builtin.systemd:
+    name: ssh
+    state: restarted
+
+- name: restart rsyslog
+  ansible.builtin.systemd:
+    name: rsyslog
+    state: restarted

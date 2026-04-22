@@ -1,0 +1,126 @@
+---
+# ============================================================
+# ssh_hardening.yml — SECTION 2: SSH Daemon Hardening
+#
+# Ubuntu 24.04 sshd_config has "Include /etc/ssh/sshd_config.d/*.conf" at the
+# TOP of the file. SSH uses first-match-wins, so drop-in files take precedence
+# over anything in the main sshd_config. Writing all STIG settings to the
+# drop-in ensures the scanner (which uses "sshd -T" effective config) sees the
+# correct values regardless of what the main config contains.
+# ============================================================
+
+- name: "SSH | Ensure sshd_config.d directory exists"
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+# Remove commented X11Forwarding from main sshd_config.
+# The scanner does: grep -ir x11forwarding /etc/ssh/sshd_config* | grep -v "^#"
+# grep output is prefixed with filename, so grep -v "^#" does NOT filter commented
+# lines inside files — both the comment and our drop-in line are returned → FAIL.
+- name: "V-270708 | Remove commented X11Forwarding from main sshd_config"
+  ansible.builtin.replace:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?\s*X11Forwarding\s+.*$'
+    replace: '# X11Forwarding managed by sshd_config.d drop-in'
+
+# V-270667/668/669 — Write SSH daemon crypto directly to main /etc/ssh/sshd_config.
+# The SCC OVAL checks the main sshd_config file (not sshd_config.d drop-ins) for
+# Ciphers, MACs, and KexAlgorithms. Writing here also prevents OpenSCAP from adding
+# duplicate lines (it skips remediation when the existing value is already correct).
+- name: "V-270667 | Set sshd Ciphers in main sshd_config"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^[#\s]*Ciphers\s'
+    line: "Ciphers {{ ssh_approved_ciphers }}"
+    state: present
+  notify: restart ssh
+
+- name: "V-270668 | Set sshd MACs in main sshd_config"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^[#\s]*MACs\s'
+    line: "MACs {{ sshd_approved_macs }}"
+    state: present
+  notify: restart ssh
+
+- name: "V-270669 | Set sshd KexAlgorithms in main sshd_config"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^[#\s]*KexAlgorithms\s'
+    line: "KexAlgorithms {{ ssh_approved_kex }}"
+    state: present
+  notify: restart ssh
+
+# V-270670/671 — Write SSH client crypto directly to main /etc/ssh/ssh_config.
+# Same rationale: SCC OVAL checks the main ssh_config file. lineinfile replaces
+# the default commented examples (#   Ciphers ..., #   MACs ...) in Ubuntu ssh_config.
+- name: "V-270670 | Set SSH client Ciphers in main ssh_config"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/ssh_config
+    regexp: '^[#\s]*Ciphers\s'
+    line: "Ciphers {{ ssh_client_approved_ciphers }}"
+    state: present
+  notify: restart ssh
+
+- name: "V-270671 | Set SSH client MACs in main ssh_config"
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/ssh_config
+    regexp: '^[#\s]*MACs\s'
+    line: "MACs {{ ssh_client_approved_macs }}"
+    state: present
+  notify: restart ssh
+
+# Deploy remaining STIG sshd settings as a drop-in.
+# NOTE: Ciphers, MACs, and KexAlgorithms are intentionally NOT in this drop-in —
+# they are written to the main sshd_config above. Having them in BOTH files causes
+# the SCC check to report "conflicting results" (grep -irs macs returns two hits).
+- name: "UBTU-24-300022/300023/300031/600000/600010/500010/200090/400110 | Deploy STIG sshd drop-in config"
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/00-stig-hardening.conf
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      # STIG-hardened SSH daemon settings for Ubuntu 24.04
+      # Managed by Ansible pre_openscap.yml — do not edit manually.
+      # Ciphers, MACs, KexAlgorithms are set in main sshd_config (not here).
+
+      # UBTU-24-300022 — Disable X11 forwarding
+      X11Forwarding no
+
+      # UBTU-24-300023 — X11 proxy display (must be yes when X11Forwarding no)
+      X11UseLocalhost yes
+
+      # UBTU-24-300031 — No empty passwords
+      PermitEmptyPasswords no
+
+      # UBTU-24-300031 — No user environment passing
+      PermitUserEnvironment no
+
+      # UBTU-24-600000 — Session keepalive interval (seconds)
+      ClientAliveInterval 600
+
+      # UBTU-24-600010 — Terminate after 1 missed keepalive (scanner requires exactly 1)
+      ClientAliveCountMax 1
+
+      # UBTU-24-500010 — Verbose logging for audit trail
+      LogLevel VERBOSE
+
+      # UBTU-24-200090 — Display last login on connect
+      PrintLastLog yes
+
+      # UBTU-24-400110 — Block direct root SSH login
+      # Root password is set for single-user mode (UBTU-24-102000); this
+      # directive ensures that password cannot be used for remote SSH.
+      PermitRootLogin no
+  notify: restart ssh
+
+- name: "SSH | Flush handlers to restart SSH now"
+  ansible.builtin.meta: flush_handlers
+
+# V-270691 (DoD banner) and V-270694 (banner acknowledgement) are handled by
+# OpenSCAP remediation — no task needed here.

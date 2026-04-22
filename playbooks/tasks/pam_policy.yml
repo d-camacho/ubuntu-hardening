@@ -1,0 +1,211 @@
+---
+# ============================================================
+# pam_policy.yml — SECTION 3: PAM & Password Policy
+# ============================================================
+
+# UBTU-24-100600 / UBTU-24-300014 / UBTU-24-300016 - pwquality settings
+- name: "UBTU-24-300014/300016/400260-400330 | Configure pwquality settings"
+  ansible.builtin.blockinfile:
+    path: /etc/security/pwquality.conf
+    backup: true
+    marker: "# {mark} STIG MANAGED BLOCK"
+    block: |
+      minlen = {{ pam_pw_minlen }}
+      dcredit = -1
+      ucredit = -1
+      lcredit = -1
+      ocredit = -1
+      difok = {{ pam_pw_difok }}
+      dictcheck = 1
+      enforcing = 1
+
+# UBTU-24-400220 / UBTU-24-400400 - Password hashing algorithm
+# SHA512 is required by the Ubuntu 24.04 STIG even though Ubuntu 24.04
+# defaults to yescrypt. The STIG scanner checks for SHA512 explicitly.
+- name: "UBTU-24-400220/400400 | Set password hashing algorithm to SHA512 in login.defs"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^[#\s]*ENCRYPT_METHOD'
+    line: "ENCRYPT_METHOD SHA512"
+    state: present
+
+# UBTU-24-400300 - Minimum password age
+- name: "UBTU-24-400300 | Set minimum password age to {{ pam_password_min_days }} day(s)"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^[#\s]*PASS_MIN_DAYS'
+    line: "PASS_MIN_DAYS {{ pam_password_min_days }}"
+    state: present
+
+# UBTU-24-400310 - Maximum password age
+- name: "UBTU-24-400310 | Set maximum password age to {{ pam_password_max_days }} days"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^[#\s]*PASS_MAX_DAYS'
+    line: "PASS_MAX_DAYS {{ pam_password_max_days }}"
+    state: present
+
+# UBTU-24-200260 - Inactive account lockout
+- name: "UBTU-24-200260 | Set account inactivity lock to {{ pam_inactive_days }} days"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^[#\s]*INACTIVE'
+    line: "INACTIVE {{ pam_inactive_days }}"
+    state: present
+
+- name: "UBTU-24-200260 | Set useradd default inactivity"
+  ansible.builtin.command:
+    cmd: "useradd -D -f {{ pam_inactive_days }}"
+  changed_when: true
+
+# UBTU-24-200000 - Limit concurrent sessions
+- name: "UBTU-24-200000 | Limit concurrent sessions to {{ pam_max_logins }}"
+  ansible.builtin.lineinfile:
+    path: /etc/security/limits.conf
+    regexp: '^\*\s+hard\s+maxlogins'
+    line: "* hard maxlogins {{ pam_max_logins }}"
+    state: present
+
+# UBTU-24-200060 - Session inactivity timeout (shell)
+- name: "UBTU-24-200060 | Set shell timeout to {{ shell_timeout_seconds }} seconds via /etc/profile.d"
+  ansible.builtin.copy:
+    dest: /etc/profile.d/tmout.sh
+    content: |
+      # STIG UBTU-24-200060 - Terminate inactive sessions
+      TMOUT={{ shell_timeout_seconds }}
+      readonly TMOUT
+      export TMOUT
+    mode: '0644'
+
+# UBTU-24-200610 - Account lockout via faillock
+- name: "UBTU-24-200610 | Configure faillock - deny after {{ faillock_deny }} failures"
+  ansible.builtin.lineinfile:
+    path: /etc/security/faillock.conf
+    regexp: '^[#\s]*deny'
+    line: "deny = {{ faillock_deny }}"
+    state: present
+    create: true
+
+- name: "UBTU-24-200610 | Configure faillock - admin must unlock"
+  ansible.builtin.lineinfile:
+    path: /etc/security/faillock.conf
+    regexp: '^[#\s]*unlock_time'
+    line: "unlock_time = 0"
+    state: present
+
+# Exempt the Ansible build user from faillock so pipeline runs cannot
+# accidentally trigger a permanent lockout on the account running the plays.
+- name: "UBTU-24-200610 | Exempt Ansible build user from faillock"
+  ansible.builtin.lineinfile:
+    path: /etc/security/faillock.conf
+    regexp: '^[#\s]*ignore_users'
+    line: "ignore_users = {{ ansible_user }}"
+    state: present
+
+# UBTU-24-300017 - Logon failure delay
+# fail_interval is the sliding observation window (in seconds) during which
+# failed attempts are counted toward the deny threshold — it is NOT the
+# per-attempt delay. The actual login delay is FAIL_DELAY in login.defs below.
+- name: "UBTU-24-300017 | Set faillock failure observation window to {{ faillock_fail_interval }} seconds"
+  ansible.builtin.lineinfile:
+    path: /etc/security/faillock.conf
+    regexp: '^[#\s]*fail_interval'
+    line: "fail_interval = {{ faillock_fail_interval }}"
+    state: present
+
+- name: "UBTU-24-300017 | Set FAIL_DELAY in login.defs"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^[#\s]*FAIL_DELAY'
+    line: "FAIL_DELAY {{ faillock_fail_delay }}"
+    state: present
+
+# UBTU-24-300021 - Require password for privilege escalation (sudo)
+- name: "UBTU-24-300021 | Ensure NOPASSWD is not in sudoers"
+  ansible.builtin.replace:
+    path: /etc/sudoers
+    regexp: 'NOPASSWD'
+    replace: 'PASSWD'
+    backup: true
+
+- name: "UBTU-24-300021 | Check sudoers.d for NOPASSWD"
+  ansible.builtin.find:
+    paths: /etc/sudoers.d
+    contains: 'NOPASSWD'
+  register: sudoers_nopasswd_files
+
+- name: "UBTU-24-300021 | Remove NOPASSWD from sudoers.d files"
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: 'NOPASSWD'
+    replace: 'PASSWD'
+  loop: "{{ sudoers_nopasswd_files.files }}"
+
+# UBTU-24-300019 - Restrict privilege elevation
+- name: "UBTU-24-300019 | Ensure !authenticate is not in sudoers"
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers
+    regexp: '!authenticate'
+    state: absent
+
+# UBTU-24-300020 - Require password for sudo -s / sudo -i
+- name: "UBTU-24-300020 | Set sudo use_pty"
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers
+    regexp: '^Defaults.*use_pty'
+    line: "Defaults use_pty"
+    state: present
+    validate: /usr/sbin/visudo -cf %s
+
+- name: "UBTU-24-300020 | Set sudo logfile"
+  ansible.builtin.lineinfile:
+    path: /etc/sudoers
+    regexp: '^Defaults.*logfile'
+    line: 'Defaults logfile="/var/log/sudo.log"'
+    state: present
+    validate: /usr/sbin/visudo -cf %s
+
+# UBTU-24-300027/300028 / V-270690 / V-270725 — Write complete common-auth.
+# Writing the full file is idempotent (copy checks content hash) and avoids the
+# lineinfile success=N counter bug: inserting modules between pam_unix.so and
+# pam_sss.so shifts the skip-count and causes pam_deny.so to fire on success.
+#
+# Stack logic:
+#   pam_faillock preauth    — blocks locked accounts before any password attempt
+#   pam_faildelay delay=4s  — enforces 4-second delay per attempt (V-270706)
+#   pam_unix.so [success=2] — on success skip pam_sss.so + authfail → authsucc
+#                             (success=2 counts modules AFTER pam_unix, not before)
+#   pam_sss.so  [success=1] — on success skip authfail → authsucc
+#   authfail [default=die]  — reached only when ALL auth modules fail; records it
+#   authsucc sufficient     — clears faillock counter on success; stops the stack
+#   pam_deny.so             — final fallback deny (only reached if authsucc fails)
+#   pam_permit.so           — required positive return for the stack
+- name: "UBTU-24-300027/300028/V-270690 | Deploy hardened common-auth"
+  ansible.builtin.copy:
+    dest: /etc/pam.d/common-auth
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # /etc/pam.d/common-auth — managed by Ansible pre_openscap.yml (STIG hardened)
+      # Do not edit manually — changes will be overwritten on next playbook run.
+      auth    required                        pam_faillock.so preauth silent
+      auth    required                        pam_faildelay.so delay=4000000
+      auth    [success=2 default=ignore]      pam_unix.so
+      auth    [success=1 default=ignore]      pam_sss.so use_first_pass
+      auth    [default=die]                   pam_faillock.so authfail
+      auth    sufficient                      pam_faillock.so authsucc
+      auth    requisite                       pam_deny.so
+      auth    required                        pam_permit.so
+      auth    optional                        pam_cap.so
+
+# V-270725 — pam_unix.so must use sha512 with rounds=100000 in common-password.
+- name: "V-270725 | Set sha512 rounds=100000 on pam_unix.so in common-password"
+  ansible.builtin.replace:
+    path: /etc/pam.d/common-password
+    regexp: '(pam_unix\.so\s+)(.*)'
+    replace: 'pam_unix.so obscure sha512 shadow rounds=100000'
+  ignore_errors: true
+
+# UBTU-24-400340 - offline_credentials_expiration is configured inside the
+# sssd.conf deployed by V-270663 above. No separate task needed here.

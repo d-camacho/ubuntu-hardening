@@ -1,3 +1,12 @@
 .trash/
 # Local inventory file copied from example.hosts.yml
 hosts.yml
+
+# IMPORTANT: vault.yml must be encrypted with ansible-vault before committing.
+# If this file appears unencrypted in git history, rotate all credentials immediately.
+# To encrypt: ansible-vault encrypt inventories/group_vars/all/vault.yml
+# To install the pre-commit guard: cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+# Uncomment the line below ONLY if you want to prevent vault.yml from ever
+# being committed (and instead manage it entirely outside the repo):
+# inventories/group_vars/all/vault.yml

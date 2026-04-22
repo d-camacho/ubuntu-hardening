@@ -1,0 +1,90 @@
+---
+# ============================================================
+# file_permissions.yml — SECTION 5: File Permissions & Ownership
+# ============================================================
+
+# UBTU-24-700100/700110/700120 - /var/log permissions
+- name: "UBTU-24-700100 | Ensure syslog group exists"
+  ansible.builtin.group:
+    name: syslog
+    state: present
+
+- name: "UBTU-24-700100/700110/700120 | Set /var/log ownership and permissions"
+  ansible.builtin.file:
+    path: /var/log
+    owner: root
+    group: syslog
+    mode: '0755'
+
+# UBTU-24-700030-700090 - journalctl and journal directory permissions
+# V-270758 — scanner expects /usr/bin/journalctl mode 0740 exactly.
+- name: "UBTU-24-700030/V-270758 | Set journalctl ownership and permissions"
+  ansible.builtin.file:
+    path: /usr/bin/journalctl
+    owner: root
+    group: root
+    mode: '0740'
+
+- name: "UBTU-24-700060/700080 | Set /var/log/journal directory ownership"
+  ansible.builtin.file:
+    path: /var/log/journal
+    owner: root
+    group: systemd-journal
+    mode: '2755'
+    recurse: false
+  ignore_errors: true
+
+- name: "UBTU-24-700060/070 | Set journal subdirectory ownership recursively"
+  ansible.builtin.command:
+    cmd: find /var/log/journal -type d -exec chown root:systemd-journal {} \;
+  changed_when: true
+  ignore_errors: true
+
+- name: "UBTU-24-700070/090 | Set journal file ownership"
+  ansible.builtin.command:
+    cmd: find /var/log/journal -type f -exec chown root:systemd-journal {} \;
+  changed_when: true
+  ignore_errors: true
+
+# UBTU-24-700010 / V-270756 - Log files must be mode 0640 or less permissive.
+# Excludes btmp, wtmp, lastlog, history, and eipp.log.xz (scanner-excluded files).
+- name: "UBTU-24-700010/V-270756 | Set /var/log files to mode 0640"
+  ansible.builtin.command:
+    cmd: >
+      find /var/log -perm /137
+      ! -name '*[bw]tmp' ! -name '*lastlog'
+      ! -name '*history' ! -name 'eipp.log.xz'
+      -type f -exec chmod 0640 '{}' \;
+  changed_when: true
+
+# UBTU-24-300030 / V-270716 - Default filesystem permissions (umask)
+# Scanner expects UMASK 077 (not 027) in /etc/login.defs.
+- name: "UBTU-24-300030/V-270716 | Set default umask to 077 in login.defs"
+  ansible.builtin.lineinfile:
+    path: /etc/login.defs
+    regexp: '^[#\s]*UMASK'
+    line: "UMASK           077"
+    state: present
+
+- name: "UBTU-24-300030 | Set default umask in /etc/profile"
+  ansible.builtin.lineinfile:
+    path: /etc/profile
+    regexp: '^[#\s]*umask'
+    line: "umask 077"
+    state: present
+
+# V-270699 - Library file group ownership must be root.
+# Check text says '*.so*' but OVAL checks ALL regular files (filename pattern '.*')
+# in /lib, /lib64, /usr/lib, /usr/lib64 that are not group-owned by root (GID 0).
+# Known non-.so offenders: ssl-cert-snakeoil.key (ssl-cert group) and
+# dbus-daemon-launch-helper (messagebus group). Drop the name filter to catch all.
+- name: "V-270699 | Set library file group ownership to root"
+  ansible.builtin.command:
+    cmd: find {{ item }} -type f ! -group root -exec chgrp root {} \;
+  loop:
+    - /lib
+    - /lib64
+    - /usr/lib
+    - /usr/lib64
+  changed_when: true
+  ignore_errors: true

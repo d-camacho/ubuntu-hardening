@@ -1,0 +1,25 @@
+---
+# ============================================================
+# aide_integrity.yml — SECTION 8: AIDE Audit Tool Integrity
+# ============================================================
+
+# V-270831 - AIDE must be configured to check integrity of audit tools.
+# Entries are added to /etc/aide/aide.conf before AIDE initialization so
+# the initial database includes fingerprints of all audit tool binaries.
+# Rule: p+i+n+u+g+s+b+acl+xattrs+sha512 (permissions, inode, nlink, uid,
+#        gid, size, block count, ACLs, extended attributes, SHA-512 hash)
+- name: "V-270831 | Configure AIDE to check audit tool integrity"
+  ansible.builtin.blockinfile:
+    path: /etc/aide/aide.conf
+    marker: "# {mark} STIG V-270831 AIDE AUDIT TOOLS"
+    block: |
+      # STIG V-270831 — Audit tool integrity checks
+      # Scanner checks /sbin/ paths (which resolve to /usr/sbin/ via merged-usr symlink).
+      /sbin/auditctl p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/auditd p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/ausearch p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/aureport p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/autrace p+i+n+u+g+s+b+acl+xattrs+sha512
+      /sbin/augenrules p+i+n+u+g+s+b+acl+xattrs+sha512
+    create: false
+  ignore_errors: true

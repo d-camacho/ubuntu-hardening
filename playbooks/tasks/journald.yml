@@ -1,0 +1,57 @@
+---
+# ============================================================
+# journald.yml — SECTION 12: journald Configuration
+# ============================================================
+
+# V-270757 - systemd-journald must be configured to persist log records,
+# compress them, and forward them to syslog.
+- name: "V-270757 | Configure journald Storage=persistent"
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: '^[#\s]*Storage='
+    line: "Storage=persistent"
+    state: present
+
+- name: "V-270757 | Configure journald Compress=yes"
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: '^[#\s]*Compress='
+    line: "Compress=yes"
+    state: present
+
+- name: "V-270757 | Configure journald ForwardToSyslog=yes"
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: '^[#\s]*ForwardToSyslog='
+    line: "ForwardToSyslog=yes"
+    state: present
+
+- name: "V-270757 | Restart systemd-journald to apply config"
+  ansible.builtin.systemd:
+    name: systemd-journald
+    state: restarted
+
+# V-270757 - Journal directories must be mode 2640; journal files must be 0640.
+# tmpfiles.d controls permissions applied at boot and on systemd-tmpfiles --create.
+# /etc/tmpfiles.d/ overrides /usr/lib/tmpfiles.d/ for the same paths.
+- name: "V-270757 | Configure tmpfiles.d for journal directory permissions"
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/99-stig-journal.conf
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      # STIG V-270757 — systemd journal permissions
+      # Format: type path mode user group age argument
+      # Note: %m (machine-id specifier) is NOT expanded in tmpfiles.d — use Z (recursive)
+      # to cover machine-id subdirectories without hardcoding the UUID.
+      z /run/log/journal 2640 root systemd-journal - -
+      Z /run/log/journal 2640 root systemd-journal - -
+      z /var/log/journal 2640 root systemd-journal - -
+      Z /var/log/journal 2640 root systemd-journal - -
+
+- name: "V-270757 | Apply tmpfiles.d journal permissions immediately"
+  ansible.builtin.command:
+    cmd: systemd-tmpfiles --create /etc/tmpfiles.d/99-stig-journal.conf
+  changed_when: true
+  ignore_errors: true

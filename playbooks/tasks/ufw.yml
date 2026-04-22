@@ -1,0 +1,23 @@
+---
+# ============================================================
+# ufw.yml — SECTION 11: UFW Rate Limiting
+# ============================================================
+
+# V-270754 - The system must configure UFW to rate-limit listening service ports.
+# OVAL runs 'ss -l46utn', captures all IPv6 listening ports, and requires every
+# port to match '22'. Any other listening port causes a failure — even if UFW
+# has a LIMIT rule for it. Disable postfix (SMTP/25) which Ubuntu installs by
+# default but is not needed on a hardened server.
+- name: "V-270754 | Disable postfix SMTP service (not required on hardened server)"
+  ansible.builtin.systemd:
+    name: postfix
+    state: stopped
+    enabled: false
+  failed_when: false
+
+- name: "V-270754 | Enable UFW rate limiting for SSH port 22"
+  community.general.ufw:
+    rule: limit
+    port: '22'
+    proto: tcp
+  ignore_errors: true

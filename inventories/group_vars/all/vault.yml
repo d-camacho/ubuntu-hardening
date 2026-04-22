@@ -5,17 +5,17 @@
 
 # Ansible connection credentials
 # Deployment account used by Ansible SSH (example: "ansible", "deploy", "ubuntu").
-ansible_user: "CHANGE_ME"
+ansible_user: "clab_admin"
 # SSH password for ansible_user when password auth is enabled.
 # Leave as a vault secret even if you usually use SSH keys.
-ansible_ssh_pass: "CHANGE_ME"
+ansible_ssh_pass: "13qeadzc!#QEADZC"
 # Sudo/become password for ansible_user.
-ansible_become_pass: "CHANGE_ME"
+ansible_become_pass: "13qeadzc!#QEADZC"
 
 # OS STIG variables consumed by pre_openscap.yml
 # Root recovery credential used for single-user/maintenance recovery paths.
 # Store plaintext here only before vault encryption.
-vault_root_recovery_password: "CHANGE_ME"
+vault_root_recovery_password: "13qeadzc!#QEADZC"
 # Central audit collector for V-270658 remote audit offload.
 # Use a real IPv4 address for SCC/OVAL reliability (avoid placeholders in production).
 vault_audispd_remote_server: "192.0.2.1"    # Replace with your real audit/log collector IPv4; use an IP for SCC/OVAL reliability.

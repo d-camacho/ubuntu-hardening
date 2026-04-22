@@ -1,0 +1,178 @@
+---
+# ============================================================
+# packages.yml — SECTION 1: Package Management
+# Remove insecure services; install required STIG packages.
+# ============================================================
+
+# UBTU-24-100010 - Remove systemd-timesyncd
+- name: "UBTU-24-100010 | Remove systemd-timesyncd package"
+  ansible.builtin.apt:
+    name: systemd-timesyncd
+    state: absent
+    purge: true
+
+# UBTU-24-100020 - Remove ntp
+- name: "UBTU-24-100020 | Remove ntp package"
+  ansible.builtin.apt:
+    name: ntp
+    state: absent
+    purge: true
+
+# UBTU-24-100030 - Remove telnet
+- name: "UBTU-24-100030 | Remove telnet package"
+  ansible.builtin.apt:
+    name: telnet
+    state: absent
+    purge: true
+
+# UBTU-24-100040 - Remove rsh-server
+- name: "UBTU-24-100040 | Remove rsh-server package"
+  ansible.builtin.apt:
+    name: rsh-server
+    state: absent
+    purge: true
+
+# UBTU-24-100700 - Install chrony
+- name: "UBTU-24-100700 | Install chrony package"
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+    update_cache: true
+
+# UBTU-24-100800 / UBTU-24-100810 - Install and enable SSH
+- name: "UBTU-24-100800 | Install openssh-server"
+  ansible.builtin.apt:
+    name: openssh-server
+    state: present
+
+- name: "UBTU-24-100800 | Enable and start SSH service"
+  ansible.builtin.systemd:
+    name: ssh
+    enabled: true
+    state: started
+
+# UBTU-24-100100 / UBTU-24-100130 - Install AIDE
+- name: "UBTU-24-100100 | Install aide package"
+  ansible.builtin.apt:
+    name: aide
+    state: present
+
+- name: "UBTU-24-100130 | Install aide-common package"
+  ansible.builtin.apt:
+    name: aide-common
+    state: present
+
+# UBTU-24-100300 / UBTU-24-100310 - Install and enable UFW
+- name: "UBTU-24-100300 | Install ufw package"
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+# Allow SSH BEFORE enabling UFW — reversing this order will lock out the
+# current SSH session the moment UFW activates its default deny-incoming policy.
+- name: "UBTU-24-100310 | Allow SSH through UFW before enabling"
+  community.general.ufw:
+    rule: allow
+    name: OpenSSH
+  ignore_errors: true
+
+- name: "UBTU-24-100310 | Enable UFW"
+  community.general.ufw:
+    state: enabled
+  ignore_errors: true
+
+# NOTE: UFW is now active with default deny-incoming.
+# This baseline opens SSH only. Any additional service ports should be
+# explicitly allowed by site policy in inventory host_vars or a wrapper playbook.
+
+# UBTU-24-100400 / UBTU-24-100410 - Install and enable auditd
+- name: "UBTU-24-100400 | Install auditd and audispd-plugins packages"
+  ansible.builtin.apt:
+    name:
+      - auditd
+      - audispd-plugins
+    state: present
+
+- name: "UBTU-24-100410 | Enable and start auditd service"
+  ansible.builtin.systemd:
+    name: auditd
+    enabled: true
+    state: started
+
+# UBTU-24-100500 / UBTU-24-100510 - Install and enable AppArmor
+- name: "UBTU-24-100500 | Install apparmor package"
+  ansible.builtin.apt:
+    name: apparmor
+    state: present
+
+- name: "UBTU-24-100510 | Enable and start AppArmor service"
+  ansible.builtin.systemd:
+    name: apparmor
+    enabled: true
+    state: started
+
+# UBTU-24-100600 - Install libpam-pwquality
+- name: "UBTU-24-100600 | Install libpam-pwquality package"
+  ansible.builtin.apt:
+    name: libpam-pwquality
+    state: present
+
+# UBTU-24-100650 - Install SSSD packages.
+# libpam-sss and libnss-sss are intentionally NOT installed here.
+# On Ubuntu, installing libpam-sss triggers pam-auth-update which automatically
+# inserts pam_sss.so into the PAM stack. If sssd is misconfigured or not yet
+# running, that causes a complete authentication lockout. The OpenSCAP fix script
+# (which runs next) will install libpam-sss after sssd is confirmed working,
+# safely integrating sssd into PAM at that point.
+- name: "UBTU-24-100650 | Install sssd package"
+  ansible.builtin.apt:
+    name: sssd
+    state: present
+
+# V-270663 - SSSD service must be enabled and running.
+# A minimal sssd.conf using the 'files' provider is created so the daemon can start
+# without an LDAP/AD identity provider. The files provider reads /etc/passwd and
+# /etc/shadow — sssd starts cleanly with no external dependencies.
+# V-270736 (ldap_user_certificate) is deploy-time only — that option is LDAP-specific
+# and crashes sssd if placed in a [domain/files] section (see Skipped header).
+- name: "V-270663 | Ensure /etc/sssd directory exists"
+  ansible.builtin.file:
+    path: /etc/sssd
+    state: directory
+    owner: root
+    group: root
+    mode: '0711'
+
+- name: "V-270663 | Deploy minimal sssd.conf (files provider, NSS only)"
+  ansible.builtin.copy:
+    dest: /etc/sssd/sssd.conf
+    owner: root
+    group: root
+    mode: '0600'
+    force: false
+    content: |
+      # Minimal SSSD configuration — STIG build image placeholder.
+      # services = nss only; PAM integration is handled by OpenSCAP fix script
+      # after sssd is confirmed running, preventing a PAM lockout during the build.
+      # Replace [domain/files] with a real LDAP/AD domain at deploy time.
+      [sssd]
+      services = nss
+      domains = files
+
+      [nss]
+
+      [domain/files]
+      id_provider = files
+
+- name: "V-270663 | Enable and start sssd service"
+  ansible.builtin.systemd:
+    name: sssd
+    enabled: true
+    state: started
+  ignore_errors: true
+
+# UBTU-24-101000 - Install vlock for session locking
+- name: "UBTU-24-101000 | Install vlock package"
+  ansible.builtin.apt:
+    name: vlock
+    state: present

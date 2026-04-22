@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# pre-commit hook: block commits of unencrypted Ansible vault files
+#
+# Install:
+#   cp hooks/pre-commit .git/hooks/pre-commit
+#   chmod +x .git/hooks/pre-commit
+#
+# This hook checks every staged file matching *vault*.yml to confirm it begins
+# with the $ANSIBLE_VAULT header. Committing plaintext vault files can expose
+# credentials in git history — rotate all affected secrets if that happens.
+
+set -euo pipefail
+
+FAILED=0
+
+while IFS= read -r staged_file; do
+    # Only check vault yml files
+    if [[ "$staged_file" != *vault*.yml ]]; then
+        continue
+    fi
+
+    # File must exist in the working tree (not a deletion)
+    if [[ ! -f "$staged_file" ]]; then
+        continue
+    fi
+
+    first_line=$(head -1 "$staged_file" 2>/dev/null || true)
+    if [[ "$first_line" != '$ANSIBLE_VAULT'* ]]; then
+        echo "ERROR: $staged_file does not appear to be encrypted with ansible-vault."
+        echo "       Encrypt it before committing:"
+        echo "         ansible-vault encrypt $staged_file"
+        FAILED=1
+    fi
+done < <(git diff --cached --name-only)
+
+if [[ "$FAILED" -ne 0 ]]; then
+    echo ""
+    echo "Commit blocked: plaintext vault file(s) detected."
+    echo "If these are example/template files that intentionally contain"
+    echo "placeholder credentials, encrypt them or exclude from git."
+    exit 1
+fi
+
+exit 0

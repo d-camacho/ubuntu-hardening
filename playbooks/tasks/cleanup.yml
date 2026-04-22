@@ -1,0 +1,72 @@
+---
+# ============================================================
+# cleanup.yml — SECTION 14: Final Cleanup & Verification
+# ============================================================
+
+# UBTU-24-400000 - Ensure no duplicate UIDs (informational check)
+- name: "UBTU-24-400000 | Check for duplicate UIDs"
+  ansible.builtin.command:
+    cmd: awk -F':' '{print $3}' /etc/passwd
+  register: uid_list
+  changed_when: false
+  failed_when: false
+
+- name: "UBTU-24-400000 | Warn on duplicate UIDs"
+  ansible.builtin.debug:
+    msg: "WARNING: duplicate UIDs detected — review /etc/passwd manually."
+  when: uid_list.stdout_lines | unique | list | length != uid_list.stdout_lines | length
+
+# UBTU-24-700400 - Vendor supported release check (informational)
+- name: "UBTU-24-700400 | Verify Ubuntu 24.04 is current supported release"
+  ansible.builtin.command:
+    cmd: lsb_release -a
+  register: lsb_info
+  changed_when: false
+  failed_when: false
+
+- name: "UBTU-24-700400 | Display release info"
+  ansible.builtin.debug:
+    var: lsb_info.stdout_lines
+
+- name: "FINAL | Run apt autoremove to clean up"
+  ansible.builtin.apt:
+    autoremove: true
+
+- name: "FINAL | Display hardening complete message"
+  ansible.builtin.debug:
+    msg: |
+      ============================================================
+      Pre-hardening complete. Summary of actions taken:
+      - Removed: telnet, rsh-server, ntp, systemd-timesyncd (purged)
+      - Installed: openssh-server, aide, ufw, auditd, audispd-plugins,
+                   apparmor, libpam-pwquality, sssd (NOT libpam-sss/libnss-sss —
+                   those are installed by OpenSCAP to avoid PAM lockout during build),
+                   chrony, rsyslog, vlock
+      - Configured: SSH Ciphers/MACs/KexAlgorithms written to main sshd_config (V-270667/668/669)
+      - Configured: SSH client Ciphers/MACs written to main ssh_config (V-270670/671)
+      - Configured: SSH drop-in /etc/ssh/sshd_config.d/00-stig-hardening.conf (non-crypto settings)
+      - Configured: PAM pam_faildelay.so delay=4000000 in common-auth (V-270706)
+      - Configured: PAM pwquality, faillock, nullok removed, password aging
+      - Configured: Kernel params (ASLR, syncookies, dmesg, core dumps)
+      - Configured: GRUB audit=1 in GRUB_CMDLINE_LINUX + GRUB_CMDLINE_LINUX_DEFAULT
+      - Configured: GRUB bootloader password (V-270675, password_pbkdf2 in grub.cfg)
+      - Configured: Root account locked via passwd -l (V-270724)
+      - Configured: Ctrl-Alt-Del disabled
+      - Configured: SSSD minimal config (files provider, NSS only) + service enabled (V-270663)
+      - Configured: Audit rules — fixed keys for su, unix_update, kmod, fdisk,
+                    cron (key=cronjobs), journal (key=systemd_journal, no slash)
+      - Configured: File permissions (/var/log mode 0640, journal, audit, libraries)
+      - Configured: journald tmpfiles.d journal directory permissions (V-270757)
+      - Configured: rsyslog auth+daemon log directives in 50-default.conf (V-270681)
+      - Configured: AIDE audit tool integrity entries with /sbin/ paths (V-270831)
+      - Configured: auditd storage settings (V-270816)
+      - Configured: audisp-remote log offloading (V-270658)
+      - Configured: chrony NTP server with maxpoll 16 (V-270751)
+      - Configured: UFW SSH rate limiting (V-270754)
+      - Skipped: FIPS kernel mode (V-270744, requires Ubuntu Pro)
+      - Skipped: SSSD PKI cert mapping (V-270736, ldap_user_certificate crashes sssd
+                 in a files domain; configure real LDAP/AD domain at deploy time)
+      - Skipped: PIV/smart card auth (requires hardware token)
+      ============================================================
+      Next step: Run OpenSCAP xccdf generate fix and apply.
+      ============================================================

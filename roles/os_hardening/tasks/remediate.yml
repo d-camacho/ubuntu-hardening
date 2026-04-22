@@ -52,7 +52,10 @@
     owner: root
     group: root
     mode: "0444"
-  when: not _sentinel.stat.exists
+  when:
+    - not _sentinel.stat.exists
+    - _remediation_ran is defined
+    - _remediation_ran.rc | default(1) == 0
   tags: [os_hardening, remediate]
 
 - name: Clean up fix script from /tmp
