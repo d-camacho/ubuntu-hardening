@@ -21,6 +21,8 @@
   become: yes
   gather_facts: no
   ignore_unreachable: true
+  vars_files:
+    - ../inventories/group_vars/all/vault.yml
   vars:
     ansible_connect_timeout: 10   # seconds; prevents hanging on banner-blocked hosts
 

@@ -129,7 +129,7 @@ ansible-playbook playbooks/pre_openscap.yml --tags pam
 ansible-playbook playbooks/pre_openscap.yml --tags audit
 ```
 
-Available tags: `packages`, `ssh`, `pam`, `kernel`, `permissions`, `audit`, `auditd`, `rsyslog`, `aide`, `ntp`, `ufw`, `journald`, `cleanup`.
+Available tags: `packages`, `openscap`, `ssh`, `pam`, `kernel`, `permissions`, `audit`, `auditd`, `rsyslog`, `aide`, `ntp`, `ufw`, `journald`, `cleanup`.
 
 ## SSG Version Management
 
@@ -156,6 +156,19 @@ os_stig_ssg_version: "0.1.80"
    ```
 
 > **Note:** After upgrading SSG, review the release notes for any new or changed Ubuntu 24.04 STIG controls that may affect your pre-hardening tasks in `playbooks/pre_openscap.yml`.
+
+### Air-Gapped Environments
+
+OpenSCAP installation and SSG staging happens in `pre_openscap.yml` (Section 2). By the time `openscap_remediation.yml` runs, all external dependencies are already satisfied — it has no internet requirements of its own.
+
+To pre-stage the SSG zip from an internal mirror or local file share, set `os_stig_ssg_local_src` in your inventory or via `-e`:
+
+```yaml
+# In inventories/group_vars/all/vars.yml or passed with -e
+os_stig_ssg_local_src: "/path/to/scap-security-guide-0.1.80.zip"
+```
+
+When `os_stig_ssg_local_src` is set, the playbook copies the zip from the control node instead of downloading from GitHub. Leave it empty (default) for internet-connected installs.
 
 ## Notes
 

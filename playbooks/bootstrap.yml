@@ -32,6 +32,8 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  vars_files:
+    - ../inventories/group_vars/all/vault.yml
 
   tasks:
     - name: Check sshpass is installed on control node
@@ -92,6 +94,8 @@
 - name: Deploy SSH key to target hosts
   hosts: all
   gather_facts: false
+  vars_files:
+    - ../inventories/group_vars/all/vault.yml
 
   vars:
     ansible_ssh_common_args: >-

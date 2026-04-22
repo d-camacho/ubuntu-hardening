@@ -1,0 +1,103 @@
+---
+# ============================================================
+# openscap_install.yml — Install OpenSCAP scanner and SCAP Security Guide
+#
+# Placed in pre_openscap.yml so that by the time openscap_remediation.yml
+# runs, all external dependencies are already satisfied. This means
+# openscap_remediation.yml has zero internet/network dependencies of its own.
+#
+# Air-gapped environments:
+#   Set os_stig_ssg_local_src to the path of a pre-staged SSG zip on the
+#   Ansible control node. The zip will be copied to the target instead of
+#   downloaded from GitHub.
+#
+#   Example (in inventory group_vars or passed via -e):
+#     os_stig_ssg_local_src: "/tmp/scap-security-guide-0.1.80.zip"
+#
+#   Leave os_stig_ssg_local_src empty (default) for internet-connected installs.
+# ============================================================
+
+- name: "OpenSCAP install | Install openscap-scanner and unzip"
+  ansible.builtin.apt:
+    name:
+      - openscap-scanner
+      - unzip
+    state: present
+    update_cache: true
+  tags: [openscap, packages]
+
+- name: "OpenSCAP install | Create SCAP install directory"
+  ansible.builtin.file:
+    path: "{{ os_stig_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  tags: [openscap, packages]
+
+- name: "OpenSCAP install | Create OSCAP results directory"
+  ansible.builtin.file:
+    path: "{{ os_stig_results_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  tags: [openscap, packages]
+
+- name: "OpenSCAP install | Check if SSG is already extracted"
+  ansible.builtin.stat:
+    path: "{{ os_stig_ssg_dir }}"
+  register: _ssg_dir
+  tags: [openscap, packages]
+
+# --- Air-gapped path: copy pre-staged zip from control node ---
+- name: "OpenSCAP install | Copy pre-staged SSG zip (air-gapped)"
+  ansible.builtin.copy:
+    src: "{{ os_stig_ssg_local_src }}"
+    dest: "{{ os_stig_zip_dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - not _ssg_dir.stat.exists
+    - os_stig_ssg_local_src | default('') | length > 0
+  tags: [openscap, packages]
+
+# --- Internet path: download from ComplianceAsCode GitHub ---
+# Ubuntu 24.04 STIG is not in the apt ssg-debderived package — must download.
+# Set os_stig_ssg_checksum to "sha256:<hex>" to verify integrity (recommended).
+- name: "OpenSCAP install | Download SCAP Security Guide {{ os_stig_ssg_version }}"
+  ansible.builtin.get_url:
+    url: "https://github.com/ComplianceAsCode/content/releases/download/v{{ os_stig_ssg_version }}/scap-security-guide-{{ os_stig_ssg_version }}.zip"
+    dest: "{{ os_stig_zip_dest }}"
+    mode: "0644"
+    checksum: "{{ os_stig_ssg_checksum | default(omit) }}"
+  when:
+    - not _ssg_dir.stat.exists
+    - os_stig_ssg_local_src | default('') | length == 0
+  tags: [openscap, packages]
+
+- name: "OpenSCAP install | Extract SCAP Security Guide"
+  ansible.builtin.unarchive:
+    src: "{{ os_stig_zip_dest }}"
+    dest: "{{ os_stig_install_dir }}"
+    remote_src: true
+    creates: "{{ os_stig_ssg_dir }}"
+  when: not _ssg_dir.stat.exists
+  tags: [openscap, packages]
+
+- name: "OpenSCAP install | Verify Ubuntu 24.04 datastream is present"
+  ansible.builtin.stat:
+    path: "{{ os_stig_ds_file }}"
+  register: _ds_file
+  tags: [openscap, packages]
+
+- name: "OpenSCAP install | Fail if Ubuntu 24.04 datastream is missing"
+  ansible.builtin.fail:
+    msg: >
+      Ubuntu 24.04 STIG datastream not found at {{ os_stig_ds_file }}.
+      Check os_stig_ssg_version (current: {{ os_stig_ssg_version }}) and confirm
+      the SSG zip includes ssg-ubuntu2404-ds.xml.
+      See TROUBLESHOOTING.md section 5 for resolution steps.
+  when: not _ds_file.stat.exists
+  tags: [openscap, packages]

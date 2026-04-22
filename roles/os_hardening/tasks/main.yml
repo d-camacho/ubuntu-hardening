@@ -4,21 +4,21 @@
 # STIG: Ubuntu 24.04 STIG (DRAFT), SCAP Security Guide v{{ os_stig_ssg_version }}
 #
 # Execution order:
-#   1. install         — openscap-scanner + SSG download (idempotent)
-#   2. prescan         — baseline scan for recordkeeping (read-only; skippable)
-#   3. remediate       — generate + apply STIG fix script; write sentinel
-#   4. post_remediate  — re-apply items OpenSCAP may have clobbered (AIDE, SSH, perms)
-#   5. reboot          — fire-and-forget shutdown; play ends cleanly
+#   1. prescan         — baseline scan for recordkeeping (read-only; skippable)
+#   2. remediate       — generate + apply STIG fix script; write sentinel
+#   3. post_remediate  — re-apply items OpenSCAP may have clobbered (AIDE, SSH, perms)
+#   4. reboot          — fire-and-forget shutdown; play ends cleanly
+#
+# NOTE: OpenSCAP scanner and SSG installation have been moved to
+# playbooks/tasks/openscap_install.yml, imported by pre_openscap.yml.
+# This ensures openscap_remediation.yml has zero internet dependencies,
+# which is required for air-gapped environments.
 #
 # NOTE: ansible.builtin.reboot is not used — the DoD/USG interactive
 # logon consent banner enabled by STIG hardening prevents Ansible from
 # reconnecting post-reboot. Post-reboot validation is performed manually
 # with DISA SCC to produce the Body of Evidence (BOE) for the AO.
 # ============================================================
-
-- name: Install OpenSCAP and SCAP Security Guide
-  ansible.builtin.include_tasks: install.yml
-  tags: [os_hardening, packages]
 
 - name: Run pre-remediation scan
   ansible.builtin.include_tasks: prescan.yml

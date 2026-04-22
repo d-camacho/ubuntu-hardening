@@ -76,73 +76,97 @@
     auditd_num_logs: 5              # number of log files to retain
     auditd_space_left: 75           # MB free before space_left_action triggers
 
+    # -------------------------------------------------------------------------
+    # OpenSCAP / SCAP Security Guide — must match roles/os_hardening/defaults/main.yml
+    # Installing OpenSCAP here ensures openscap_remediation.yml has no internet
+    # dependencies of its own, which is required for air-gapped environments.
+    #
+    # Air-gapped installs: set os_stig_ssg_local_src to the path of a pre-staged
+    # SSG zip on the Ansible control node (leave empty for internet-connected installs).
+    #   Example: os_stig_ssg_local_src: "/tmp/scap-security-guide-0.1.80.zip"
+    # -------------------------------------------------------------------------
+    os_stig_ssg_version: "0.1.80"
+    os_stig_install_dir: "/opt/scap"
+    os_stig_results_dir: "/var/log/oscap"
+    os_stig_ssg_checksum: ""         # set to "sha256:<hex>" to verify download integrity
+    os_stig_ssg_local_src: ""        # set to a local zip path for air-gapped installs
+    # Derived paths — update os_stig_ssg_version above; do not set these directly
+    os_stig_ssg_dir:  "{{ os_stig_install_dir }}/scap-security-guide-{{ os_stig_ssg_version }}"
+    os_stig_ds_file:  "{{ os_stig_ssg_dir }}/ssg-ubuntu2404-ds.xml"
+    os_stig_zip_dest: "{{ os_stig_install_dir }}/scap-security-guide-{{ os_stig_ssg_version }}.zip"
+
   tasks:
     - name: "1 | Package management"
       ansible.builtin.import_tasks:
         file: tasks/packages.yml
       tags: [packages]
 
-    - name: "2 | SSH daemon hardening"
+    - name: "2 | OpenSCAP scanner and SCAP Security Guide"
+      ansible.builtin.import_tasks:
+        file: tasks/openscap_install.yml
+      tags: [openscap, packages]
+
+    - name: "3 | SSH daemon hardening"
       ansible.builtin.import_tasks:
         file: tasks/ssh_hardening.yml
       tags: [ssh]
 
-    - name: "3 | PAM and password policy"
+    - name: "4 | PAM and password policy"
       ansible.builtin.import_tasks:
         file: tasks/pam_policy.yml
       tags: [pam]
 
-    - name: "4 | Kernel and system parameters"
+    - name: "5 | Kernel and system parameters"
       ansible.builtin.import_tasks:
         file: tasks/kernel_params.yml
       tags: [kernel]
 
-    - name: "5 | File permissions and ownership"
+    - name: "6 | File permissions and ownership"
       ansible.builtin.import_tasks:
         file: tasks/file_permissions.yml
       tags: [permissions]
 
-    - name: "6 | Audit rules"
+    - name: "7 | Audit rules"
       ansible.builtin.import_tasks:
         file: tasks/audit_rules.yml
       tags: [audit]
 
-    - name: "7 | rsyslog"
+    - name: "8 | rsyslog"
       ansible.builtin.import_tasks:
         file: tasks/rsyslog.yml
       tags: [rsyslog]
 
-    - name: "8 | AIDE audit tool integrity"
+    - name: "9 | AIDE audit tool integrity"
       ansible.builtin.import_tasks:
         file: tasks/aide_integrity.yml
       tags: [aide]
 
-    - name: "9 | Auditd storage and remote logging"
+    - name: "10 | Auditd storage and remote logging"
       ansible.builtin.import_tasks:
         file: tasks/auditd_storage.yml
       tags: [audit, auditd]
 
-    - name: "10 | Chrony NTP"
+    - name: "11 | Chrony NTP"
       ansible.builtin.import_tasks:
         file: tasks/ntp.yml
       tags: [ntp]
 
-    - name: "11 | UFW rate limiting"
+    - name: "12 | UFW rate limiting"
       ansible.builtin.import_tasks:
         file: tasks/ufw.yml
       tags: [ufw]
 
-    - name: "12 | journald"
+    - name: "13 | journald"
       ansible.builtin.import_tasks:
         file: tasks/journald.yml
       tags: [journald]
 
-    - name: "13 | AIDE initialization"
+    - name: "14 | AIDE initialization"
       ansible.builtin.import_tasks:
         file: tasks/aide_init.yml
       tags: [aide]
 
-    - name: "14 | Final cleanup and verification"
+    - name: "15 | Final cleanup and verification"
       ansible.builtin.import_tasks:
         file: tasks/cleanup.yml
       tags: [cleanup]
